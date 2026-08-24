@@ -183,6 +183,7 @@ bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
 
 // User sends their Telebirr transaction ID as a plain text message
 bot.on('text', async (ctx) => {
+  if (ctx.chat.type !== 'private') return; // only handle transaction IDs in DMs, never in groups
   const userId = ctx.from.id;
   const lock = store.getActiveLock(userId);
   if (!lock) return; // not in the middle of a reservation — ignore
