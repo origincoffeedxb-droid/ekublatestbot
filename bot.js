@@ -22,24 +22,46 @@ const bot = new Telegraf(BOT_TOKEN);
 
 // Short tier codes keep Telegram callback_data under the 64-byte limit.
 const TIERS = {
-  a: { amount: 200, label: '200 ETB' },
-  b: { amount: 500, label: '500 ETB' },
-  c: { amount: 1000, label: '1000 ETB' },
+  a: { amount: 200, label: '200 ብር' },
+  b: { amount: 500, label: '500 ብር' },
+  c: { amount: 1000, label: '1000 ብር' },
 };
 const PAGE_SIZE = 50; // numbers per page (5 rows x 10)
 
 function displayName(from) {
-  return from.username ? '@' + from.username : (from.first_name || 'user');
+  return from.username ? '@' + from.username : (from.first_name || 'ተጠቃሚ');
 }
+
+// ---------- "Next-gen" number styling helpers ----------
+
+// Renders a number using bold Unicode math digits (𝟏𝟐𝟑...) so open/actionable
+// numbers visually pop against the plain-digit taken/pending ones.
+const BOLD_DIGITS = ['𝟎', '𝟏', '𝟐', '𝟑', '𝟒', '𝟓', '𝟔', '𝟕', '𝟖', '𝟗'];
+function boldNumber(n) {
+  return String(n).split('').map((d) => BOLD_DIGITS[Number(d)]).join('');
+}
+
+// Compact 10-block progress bar for a tier's fill status.
+function progressBar(filled, total = 100, size = 10) {
+  const filledBlocks = Math.max(0, Math.min(size, Math.round((filled / total) * size)));
+  return '🟪'.repeat(filledBlocks) + '⬜'.repeat(size - filledBlocks);
+}
+
+const STATUS_LABEL = {
+  locked: 'ተይዟል',
+  pending: 'በክለሳ ላይ',
+  confirmed: 'ተረጋግጧል',
+};
 
 // ---------- Keyboards ----------
 
 function mainMenuKeyboard() {
-  return Markup.inlineKeyboard([
-    Object.entries(TIERS).map(([code, t]) =>
-      Markup.button.callback(t.label, `tier:${code}`)
-    ),
-  ]);
+  const buttons = Object.entries(TIERS).map(([code, t]) => {
+    const round = store.getCurrentRound(code);
+    const filled = store.countConfirmed(code, round);
+    return [Markup.button.callback(`💎 ${t.label}  •  ${filled}/100 ተይዟል`, `tier:${code}`)];
+  });
+  return Markup.inlineKeyboard(buttons);
 }
 
 function numbersGridKeyboard(tierCode, round, page) {
@@ -55,10 +77,12 @@ function numbersGridKeyboard(tierCode, round, page) {
   for (let n = start; n <= end; n++) {
     const status = statusByNumber[n];
     let icon;
-    if (!status) icon = `${n}`; // open
-    else if (status === 'locked') icon = `🔒${n}`;
-    else if (status === 'pending') icon = `🟡${n}`;
-    else icon = `🔴${n}`; // confirmed / taken
+    // Open numbers get a bold "gem" chip look; taken/pending numbers stay
+    // visually muted/flat so the eye is drawn straight to what's available.
+    if (!status) icon = `🔷${boldNumber(n)}`; // open — actionable
+    else if (status === 'locked') icon = `🔒${n}`; // reserved (temp hold)
+    else if (status === 'pending') icon = `🟠${n}`; // payment under review
+    else icon = `⚫${n}`; // confirmed / taken
 
     if (status) {
       row.push(Markup.button.callback(icon, 'noop')); // not selectable
@@ -73,13 +97,21 @@ function numbersGridKeyboard(tierCode, round, page) {
   if (row.length) buttons.push(row);
 
   const nav = [];
-  if (page > 0) nav.push(Markup.button.callback('⬅️ Prev', `pg:${tierCode}:${page - 1}`));
-  if (end < 100) nav.push(Markup.button.callback('Next ➡️', `pg:${tierCode}:${page + 1}`));
+  if (page > 0) nav.push(Markup.button.callback('◀️ ወደኋላ', `pg:${tierCode}:${page - 1}`));
+  if (end < 100) nav.push(Markup.button.callback('ወደፊት ▶️', `pg:${tierCode}:${page + 1}`));
   if (nav.length) buttons.push(nav);
 
-  buttons.push([Markup.button.callback('⬅️ Back to tiers', 'menu')]);
+  buttons.push([Markup.button.callback('🔙 ወደ ደረጃዎች ተመለስ', 'menu')]);
 
   return Markup.inlineKeyboard(buttons);
+}
+
+// Persistent bottom menu (reply keyboard) — gives the bot an "app" feel.
+function replyMenu() {
+  return Markup.keyboard([
+    ['🎟 ቁጥር ምረጥ', '📍 ማስያዜ'],
+    ['❓ እገዛ'],
+  ]).resize();
 }
 
 // ---------- Commands ----------
@@ -90,45 +122,58 @@ bot.command('whereami', (ctx) => {
   ctx.reply(`Chat ID: ${ctx.chat.id}\nChat type: ${ctx.chat.type}\nChat title: ${ctx.chat.title || '(none — private chat)'}`);
 });
 
-bot.start((ctx) => {
-  ctx.reply(
-    `Welcome to ${TELEBIRR_NAME}'s daily draw! 🎉\n\n` +
-      `Pick a tier, then pick a free number from 1–100. You'll get 5 minutes to send the ` +
-      `deposit via Telebirr and submit your transaction number. Once all 100 numbers in a ` +
-      `tier are paid and confirmed, one winner is drawn automatically.\n\n` +
-      `Legend: plain number = open, 🔒 = reserved by someone, 🟡 = payment under review, 🔴 = confirmed/taken.`,
-    mainMenuKeyboard()
+bot.start(async (ctx) => {
+  await ctx.reply(
+    `🎉 <b>እንኳን ወደ ${TELEBIRR_NAME} ዕለታዊ ዕጣ በደህና መጡ!</b>\n\n` +
+      `ከታች ያለውን ደረጃ ይምረጡ፣ ከዚያም ከ<b>1</b> እስከ <b>100</b> ውስጥ ክፍት ቁጥር ይያዙ። ` +
+      `ክፍያውን በቴሌብር በ<b>${LOCK_MINUTES} ደቂቃ</b> ውስጥ ልከው የግብይት ቁጥሩን ማስገባት ይኖርብዎታል። ` +
+      `በደረጃው ውስጥ ያሉት 100 ቁጥሮች ሁሉ ተከፍለው ሲረጋገጡ በራስ-ሰር አንድ አሸናፊ ይመረጣል።\n\n` +
+      `<b>መግለጫ</b>\n🔷 ክፍት   🔒 ተይዟል   🟠 በክለሳ ላይ   ⚫ ተረጋግጧል\n\n` +
+      `👇 ለመጀመር ደረጃ ይምረጡ፦`,
+    { parse_mode: 'HTML', ...mainMenuKeyboard() }
   );
+  await ctx.reply('ከታች ያለውን ምናሌ በማንኛውም ጊዜ ይጠቀሙ 👇', replyMenu());
 });
 
 bot.command('numbers', (ctx) => {
-  ctx.reply('Choose a tier to view its numbers:', mainMenuKeyboard());
+  ctx.reply('ቁጥሮችን ለማየት ደረጃ ይምረጡ፦', mainMenuKeyboard());
+});
+bot.hears('🎟 ቁጥር ምረጥ', (ctx) => {
+  ctx.reply('ቁጥሮችን ለማየት ደረጃ ይምረጡ፦', mainMenuKeyboard());
 });
 
-bot.command('mynumber', (ctx) => {
+function mynumberReply(ctx) {
   const lock = store.getActiveLock(ctx.from.id);
-  if (!lock) return ctx.reply("You don't have an active reservation right now.");
+  if (!lock) return ctx.reply('❕ አሁን ምንም ንቁ ማስያዝ የለዎትም።');
   const row = store.getNumberRow(lock.tier, lock.round, lock.number);
+  const status = row ? (STATUS_LABEL[row.status] || row.status) : 'የማይታወቅ';
   ctx.reply(
-    `Your reservation: number ${lock.number} in the ${TIERS[lock.tier].label} tier.\n` +
-      `Status: ${row ? row.status : 'unknown'}.`
+    `📍 <b>የእርስዎ ማስያዝ፦</b> ቁጥር ${boldNumber(lock.number)} በ${TIERS[lock.tier].label} ደረጃ።\n` +
+      `ሁኔታ፦ ${status}`,
+    { parse_mode: 'HTML' }
   );
-});
+}
+bot.command('mynumber', mynumberReply);
+bot.hears('📍 ማስያዜ', mynumberReply);
 
-bot.action('noop', (ctx) => ctx.answerCbQuery('That number is already taken.'));
+bot.hears('❓ እገዛ', (ctx) => ctx.reply('🛟 ድጋፍ ካስፈለገዎት፦ @yourusername'));
+
+bot.action('noop', (ctx) => ctx.answerCbQuery('ይህ ቁጥር አስቀድሞ ተይዟል።'));
 
 bot.action('menu', async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.editMessageText('Choose a tier:', mainMenuKeyboard());
+  await ctx.editMessageText('ደረጃ ይምረጡ፦', mainMenuKeyboard());
 });
 
 bot.action(/^tier:([a-c])$/, async (ctx) => {
   const tierCode = ctx.match[1];
   await ctx.answerCbQuery();
   const round = store.getCurrentRound(tierCode);
+  const filled = store.countConfirmed(tierCode, round);
   await ctx.editMessageText(
-    `${TIERS[tierCode].label} tier — pick any open number (1–100):`,
-    numbersGridKeyboard(tierCode, round, 0)
+    `💎 <b>${TIERS[tierCode].label} ደረጃ</b>\n${progressBar(filled)}  ${filled}/100\n\n` +
+      `ማንኛውንም 🔷 ክፍት ቁጥር ይምረጡ (1–100)፦`,
+    { parse_mode: 'HTML', ...numbersGridKeyboard(tierCode, round, 0) }
   );
 });
 
@@ -137,9 +182,11 @@ bot.action(/^pg:([a-c]):(\d+)$/, async (ctx) => {
   const page = parseInt(ctx.match[2], 10);
   await ctx.answerCbQuery();
   const round = store.getCurrentRound(tierCode);
+  const filled = store.countConfirmed(tierCode, round);
   await ctx.editMessageText(
-    `${TIERS[tierCode].label} tier — pick any open number (1–100):`,
-    numbersGridKeyboard(tierCode, round, page)
+    `💎 <b>${TIERS[tierCode].label} ደረጃ</b>\n${progressBar(filled)}  ${filled}/100\n\n` +
+      `ማንኛውንም 🔷 ክፍት ቁጥር ይምረጡ (1–100)፦`,
+    { parse_mode: 'HTML', ...numbersGridKeyboard(tierCode, round, page) }
   );
 });
 
@@ -151,26 +198,26 @@ bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
 
   const existingLock = store.getActiveLock(userId);
   if (existingLock) {
-    await ctx.answerCbQuery('You already have a reserved number. Finish that one first.', { show_alert: true });
+    await ctx.answerCbQuery('አስቀድመው የያዙት ቁጥር አለዎት። እባክዎ መጀመሪያ ያንን ይጨርሱ።', { show_alert: true });
     return;
   }
 
   const round = store.getCurrentRound(tierCode);
   const current = store.getNumberRow(tierCode, round, number);
   if (current) {
-    await ctx.answerCbQuery('Sorry, someone just took that number.', { show_alert: true });
+    await ctx.answerCbQuery('ይቅርታ፣ ያ ቁጥር አሁን በሌላ ሰው ተይዟል።', { show_alert: true });
     return;
   }
 
   store.lockNumber(tierCode, round, number, userId, displayName(ctx.from));
-  await ctx.answerCbQuery('Number reserved!');
+  await ctx.answerCbQuery('ቁጥር ተይዟል! 🔷');
 
   await ctx.reply(
-    `✅ Number ${number} in the ${tier.label} tier is reserved for you for ${LOCK_MINUTES} minutes.\n\n` +
-      `📲 Send ${tier.amount} ETB via Telebirr to:\n` +
-      `   ${TELEBIRR_NUMBER} (${TELEBIRR_NAME})\n\n` +
-      `Then reply here with your Telebirr transaction number (e.g. ABC123XYZ) BEFORE the timer runs out. ` +
-      `If we don't receive it in time, the number is released back to everyone.`
+    `✅ ቁጥር <b>${boldNumber(number)}</b> በ${tier.label} ደረጃ ውስጥ ለ<b>${LOCK_MINUTES} ደቂቃ</b> ለእርስዎ ተይዟል። ⏱️\n\n` +
+      `📲 <b>${tier.amount} ብር</b> በቴሌብር ወደ፦\n<code>${TELEBIRR_NUMBER}</code> (${TELEBIRR_NAME})\n\n` +
+      `ከላኩ በኋላ የቴሌብር ግብይት ቁጥርዎን (ለምሳሌ ABC123XYZ) ጊዜው ከማለቁ በፊት እዚህ ይላኩልን። ` +
+      `በሰዓቱ ካልደረሰን፣ ቁጥሩ ለሁሉም ሰው ክፍት ይሆናል።`,
+    { parse_mode: 'HTML' }
   );
 
   setTimeout(async () => {
@@ -180,7 +227,7 @@ bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
       try {
         await bot.telegram.sendMessage(
           userId,
-          `⏰ Time's up — number ${number} (${tier.label} tier) wasn't confirmed in time and has been released. You can pick another number anytime.`
+          `⏰ ጊዜው አልቋል — ቁጥር ${number} (${TIERS[tierCode].label} ደረጃ) በሰዓቱ ስላልተረጋገጠ ተለቋል። በማንኛውም ጊዜ ሌላ ቁጥር መምረጥ ይችላሉ።`
         );
       } catch (e) { /* user may have blocked the bot */ }
     }
@@ -195,36 +242,39 @@ bot.on('text', async (ctx) => {
 
   const row = store.getNumberRow(lock.tier, lock.round, lock.number);
   if (!row || row.status !== 'locked') {
-    return ctx.reply('Your submission for this number is already under review — please wait for admin confirmation.');
+    return ctx.reply('የእርስዎ ማመልከቻ ለዚህ ቁጥር አስቀድሞ በክለሳ ላይ ነው — እባክዎ የአስተዳዳሪ ማረጋገጫን ይጠብቁ።');
   }
 
   const txnId = ctx.message.text.trim();
   if (txnId.length < 4) {
-    return ctx.reply('That doesn\'t look like a valid transaction number. Please send the Telebirr transaction ID.');
+    return ctx.reply('ይህ ትክክለኛ የግብይት ቁጥር አይመስልም። እባክዎ የቴሌብር ግብይት መታወቂያውን ይላኩ።');
   }
 
   store.submitTxn(lock.tier, lock.round, lock.number, txnId);
-  await ctx.reply('📨 Received! Your payment is now under review by an admin. You\'ll be notified once confirmed.');
+  await ctx.reply('📨 ደርሶናል! ክፍያዎ አሁን በአስተዳዳሪ በክለሳ ላይ ነው። ሲረጋገጥ ይነገርዎታል።');
 
   const tier = TIERS[lock.tier];
   try {
     await bot.telegram.sendMessage(
       ADMIN_CHAT_ID,
-      `🆕 Deposit submitted\n` +
-        `Tier: ${tier.label}\n` +
-        `Number: ${lock.number}\n` +
-        `User: ${displayName(ctx.from)} (id ${userId})\n` +
-        `Transaction ID: ${txnId}\n\n` +
-        `Please verify this against your Telebirr statement before approving.`,
-      Markup.inlineKeyboard([
-        Markup.button.callback('✅ Approve', `appr:${lock.tier}:${lock.number}`),
-        Markup.button.callback('❌ Reject', `rej:${lock.tier}:${lock.number}`),
-      ])
+      `🆕 <b>አዲስ ክፍያ ገብቷል</b>\n` +
+        `ደረጃ፦ ${tier.label}\n` +
+        `ቁጥር፦ ${lock.number}\n` +
+        `ተጠቃሚ፦ ${displayName(ctx.from)} (id ${userId})\n` +
+        `የግብይት መታወቂያ፦ <code>${txnId}</code>\n\n` +
+        `ከማጽደቅዎ በፊት ከቴሌብር ዝርዝርዎ ጋር እባክዎ ያረጋግጡ።`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          Markup.button.callback('✅ አጽድቅ', `appr:${lock.tier}:${lock.number}`),
+          Markup.button.callback('❌ አትቀበል', `rej:${lock.tier}:${lock.number}`),
+        ]),
+      }
     );
   } catch (e) {
     console.error('Failed to notify admin chat — check ADMIN_CHAT_ID is set correctly:', e.message);
     await ctx.reply(
-      "We received your submission, but couldn't reach the admin team right now. Please contact support directly with your transaction ID."
+      'ማመልከቻዎ ደርሶናል፣ ነገር ግን አሁን የአስተዳዳሪ ቡድኑን ማግኘት አልቻልንም። እባክዎ ከግብይት ቁጥርዎ ጋር በቀጥታ ድጋፍን ያግኙ።'
     );
   }
 });
@@ -242,18 +292,18 @@ bot.action(/^appr:([a-c]):(\d+)$/, async (ctx) => {
   const round = store.getCurrentRound(tierCode);
   const row = store.getNumberRow(tierCode, round, number);
   if (!row || row.status !== 'pending') {
-    return ctx.answerCbQuery('Nothing pending for this number.', { show_alert: true });
+    return ctx.answerCbQuery('ለዚህ ቁጥር የሚጠባበቅ ነገር የለም።', { show_alert: true });
   }
 
   store.confirmNumber(tierCode, round, number, row.user_id);
-  await ctx.answerCbQuery('Confirmed.');
-  await ctx.editMessageText(ctx.callbackQuery.message.text + '\n\n✅ APPROVED');
+  await ctx.answerCbQuery('ተረጋግጧል።');
+  await ctx.editMessageText(ctx.callbackQuery.message.text + '\n\n✅ ጸድቋል');
 
   if (row.user_id) {
     try {
       await bot.telegram.sendMessage(
         row.user_id,
-        `🎉 Your payment for number ${number} (${TIERS[tierCode].label} tier) is confirmed! You're officially in the draw. Good luck!`
+        `🎉 ለቁጥር ${number} (${TIERS[tierCode].label} ደረጃ) ያደረጉት ክፍያ ተረጋግጧል! በይፋ በዕጣው ውስጥ ገብተዋል። መልካም ዕድል!`
       );
     } catch (e) {}
   }
@@ -271,19 +321,19 @@ bot.action(/^rej:([a-c]):(\d+)$/, async (ctx) => {
   const round = store.getCurrentRound(tierCode);
   const row = store.getNumberRow(tierCode, round, number);
   if (!row || row.status !== 'pending') {
-    return ctx.answerCbQuery('Nothing pending for this number.', { show_alert: true });
+    return ctx.answerCbQuery('ለዚህ ቁጥር የሚጠባበቅ ነገር የለም።', { show_alert: true });
   }
 
   store.releaseNumber(tierCode, round, number, row.user_id);
-  await ctx.answerCbQuery('Rejected.');
-  await ctx.editMessageText(ctx.callbackQuery.message.text + '\n\n❌ REJECTED — number released');
+  await ctx.answerCbQuery('ተቀባይነት አላገኘም።');
+  await ctx.editMessageText(ctx.callbackQuery.message.text + '\n\n❌ ውድቅ ሆነ — ቁጥሩ ተለቋል');
 
   if (row.user_id) {
     try {
       await bot.telegram.sendMessage(
         row.user_id,
-        `❌ We couldn't verify your transaction for number ${number} (${TIERS[tierCode].label} tier). The number has been released. ` +
-          `If you believe this is an error, please contact support with your transaction ID.`
+        `❌ ለቁጥር ${number} (${TIERS[tierCode].label} ደረጃ) ያደረጉትን ግብይት ማረጋገጥ አልቻልንም። ቁጥሩ ተለቋል። ` +
+          `ስህተት ነው ብለው ካሰቡ፣ እባክዎ ከግብይት ቁጥርዎ ጋር ድጋፍን ያግኙ።`
       );
     } catch (e) {}
   }
@@ -296,15 +346,15 @@ async function runDraw(tierCode, round) {
 
   const tier = TIERS[tierCode];
   const text =
-    `🎊 DRAW RESULT — ${tier.label} tier (round ${round}) 🎊\n\n` +
-    `Winning number: ${winnerRow.number}\n` +
-    `Winner: ${winnerRow.username || 'user ' + winnerRow.user_id}\n\n` +
-    `Congratulations! A new round starts now — pick a number to join.`;
+    `🎊 <b>የዕጣ ውጤት — ${tier.label} ደረጃ (ዙር ${round})</b> 🎊\n\n` +
+    `አሸናፊ ቁጥር፦ ${boldNumber(winnerRow.number)}\n` +
+    `አሸናፊ፦ ${winnerRow.username || 'ተጠቃሚ ' + winnerRow.user_id}\n\n` +
+    `እንኳን ደስ አለዎት! አዲስ ዙር አሁን ይጀምራል — ለመቀላቀል ቁጥር ይምረጡ።`;
 
-  await bot.telegram.sendMessage(ADMIN_CHAT_ID, text);
+  await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, { parse_mode: 'HTML' });
   if (ANNOUNCE_CHAT_ID) {
     try {
-      await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, text);
+      await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, text, { parse_mode: 'HTML' });
     } catch (e) {
       console.error('Could not post to ANNOUNCE_CHAT_ID:', e.message);
     }
@@ -313,7 +363,7 @@ async function runDraw(tierCode, round) {
     try {
       await bot.telegram.sendMessage(
         winnerRow.user_id,
-        `🏆 Congratulations! You won the ${tier.label} tier draw with number ${winnerRow.number}! Our admin will contact you shortly.`
+        `🏆 እንኳን ደስ አለዎት! በቁጥር ${winnerRow.number} የ${tier.label} ደረጃ ዕጣውን አሸንፈዋል! አስተዳዳሪያችን በቅርቡ ያገኝዎታል።`
       );
     } catch (e) {}
   }
@@ -327,10 +377,10 @@ bot.command('newround', async (ctx) => {
   const parts = ctx.message.text.split(' ');
   const tierCode = parts[1];
   if (!TIERS[tierCode]) {
-    return ctx.reply('Usage: /newround a|b|c   (a=200 ETB, b=500 ETB, c=1000 ETB)');
+    return ctx.reply('Usage: /newround a|b|c   (a=200 ብር, b=500 ብር, c=1000 ብር)');
   }
   const next = store.startNewRound(tierCode);
-  ctx.reply(`Started round ${next} for ${TIERS[tierCode].label} tier. All numbers are open again.`);
+  ctx.reply(`ለ${TIERS[tierCode].label} ደረጃ ዙር ${next} ተጀምሯል። ሁሉም ቁጥሮች እንደገና ክፍት ናቸው።`);
 });
 
 // ---------- Safety net: periodic sweep for expired locks (covers server restarts) ----------
@@ -343,7 +393,7 @@ setInterval(() => {
       bot.telegram
         .sendMessage(
           row.user_id,
-          `⏰ Number ${row.number} (${TIERS[row.tier].label} tier) reservation expired and was released.`
+          `⏰ ቁጥር ${row.number} (${TIERS[row.tier].label} ደረጃ) ማስያዝ ጊዜው አልቋል እና ተለቋል።`
         )
         .catch(() => {});
     }
