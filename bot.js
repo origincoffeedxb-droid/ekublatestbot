@@ -84,6 +84,12 @@ function numbersGridKeyboard(tierCode, round, page) {
 
 // ---------- Commands ----------
 
+// Temporary helper: reveals the current chat's ID so you can find your ADMIN_CHAT_ID.
+// Safe to leave in permanently — it only ever shows the ID of the chat it's used in.
+bot.command('whereami', (ctx) => {
+  ctx.reply(`Chat ID: ${ctx.chat.id}\nChat type: ${ctx.chat.type}\nChat title: ${ctx.chat.title || '(none — private chat)'}`);
+});
+
 bot.start((ctx) => {
   ctx.reply(
     `Welcome to ${TELEBIRR_NAME}'s daily draw! 🎉\n\n` +
