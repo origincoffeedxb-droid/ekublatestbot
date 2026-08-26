@@ -98,9 +98,7 @@ bot.start((ctx) => {
 bot.command('numbers', (ctx) => {
   ctx.reply('Choose a tier to view its numbers:', mainMenuKeyboard());
 });
-bot.command('whereami', (ctx) => {
-  ctx.reply(`Chat ID: ${ctx.chat.id}\nChat type: ${ctx.chat.type}`);
-});
+
 bot.command('mynumber', (ctx) => {
   const lock = store.getActiveLock(ctx.from.id);
   if (!lock) return ctx.reply("You don't have an active reservation right now.");
@@ -185,7 +183,6 @@ bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
 
 // User sends their Telebirr transaction ID as a plain text message
 bot.on('text', async (ctx) => {
-  if (ctx.chat.type !== 'private') return; // only handle transaction IDs in DMs, never in groups
   const userId = ctx.from.id;
   const lock = store.getActiveLock(userId);
   if (!lock) return; // not in the middle of a reservation — ignore
@@ -204,19 +201,26 @@ bot.on('text', async (ctx) => {
   await ctx.reply('📨 Received! Your payment is now under review by an admin. You\'ll be notified once confirmed.');
 
   const tier = TIERS[lock.tier];
-  await bot.telegram.sendMessage(
-    ADMIN_CHAT_ID,
-    `🆕 Deposit submitted\n` +
-      `Tier: ${tier.label}\n` +
-      `Number: ${lock.number}\n` +
-      `User: ${displayName(ctx.from)} (id ${userId})\n` +
-      `Transaction ID: ${txnId}\n\n` +
-      `Please verify this against your Telebirr statement before approving.`,
-    Markup.inlineKeyboard([
-      Markup.button.callback('✅ Approve', `appr:${lock.tier}:${lock.number}`),
-      Markup.button.callback('❌ Reject', `rej:${lock.tier}:${lock.number}`),
-    ])
-  );
+  try {
+    await bot.telegram.sendMessage(
+      ADMIN_CHAT_ID,
+      `🆕 Deposit submitted\n` +
+        `Tier: ${tier.label}\n` +
+        `Number: ${lock.number}\n` +
+        `User: ${displayName(ctx.from)} (id ${userId})\n` +
+        `Transaction ID: ${txnId}\n\n` +
+        `Please verify this against your Telebirr statement before approving.`,
+      Markup.inlineKeyboard([
+        Markup.button.callback('✅ Approve', `appr:${lock.tier}:${lock.number}`),
+        Markup.button.callback('❌ Reject', `rej:${lock.tier}:${lock.number}`),
+      ])
+    );
+  } catch (e) {
+    console.error('Failed to notify admin chat — check ADMIN_CHAT_ID is set correctly:', e.message);
+    await ctx.reply(
+      "We received your submission, but couldn't reach the admin team right now. Please contact support directly with your transaction ID."
+    );
+  }
 });
 
 // ---------- Admin approve/reject ----------
@@ -339,6 +343,14 @@ setInterval(() => {
     }
   }
 }, 30 * 1000);
+
+// Global safety net: log unexpected errors instead of crashing the whole process.
+bot.catch((err, ctx) => {
+  console.error(`Unhandled bot error for update ${ctx.updateType}:`, err.message);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled promise rejection (bot kept running):', err && err.message);
+});
 
 bot.launch().then(() => console.log('Bot is running (polling mode).'));
 
