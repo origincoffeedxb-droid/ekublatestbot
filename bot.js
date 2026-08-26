@@ -98,7 +98,9 @@ bot.start((ctx) => {
 bot.command('numbers', (ctx) => {
   ctx.reply('Choose a tier to view its numbers:', mainMenuKeyboard());
 });
-
+bot.command('whereami', (ctx) => {
+  ctx.reply(`Chat ID: ${ctx.chat.id}\nChat type: ${ctx.chat.type}`);
+});
 bot.command('mynumber', (ctx) => {
   const lock = store.getActiveLock(ctx.from.id);
   if (!lock) return ctx.reply("You don't have an active reservation right now.");
