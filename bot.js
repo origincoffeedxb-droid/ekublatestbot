@@ -129,7 +129,7 @@ function reservationCardText(tier, number, remainingMs) {
     `🔒 <b>የመረጡትን ቁጥር ይዘዋል </b>\n\n` +
     `ቁጥር <b>${boldNumber(number)}</b> በ<b>${tier.label}</b> ለእርስዎ ተይዟል።\n\n` +
     `<blockquote>📲 <b>${tier.amount} ብር</b> በቴሌብር ወደ፦\n<code>${TELEBIRR_NUMBER}</code>  (${TELEBIRR_NAME})</blockquote>\n\n` +
-    `⏳ ለማረጋገጥ የሚቀሮት ሰዓት ፦ <b>${formatRemaining(remainingMs)}</b>\n` +
+    `⏳ ለማረጋገጥ የሚቀሮት ደቂቃ ፦ <b>${formatRemaining(remainingMs)}</b>\n` +
     `ብሩን ከላኩ በኋላ የቴሌብር Transaction እዚሁ ይላኩልን።\n` +
     `በአምስት ደቂቃ ውስጥ ካልደረሰን፣ ምርጫዎ ይሰረዝ እና ቁጥሩ ለሁሉም ሰው ክፍት ይሆናል።`
   );
@@ -199,7 +199,7 @@ async function postFullBoardToChannel(tierCode, round) {
   }
 
   const tier = TIERS[tierCode];
-  const header = `📋 <b>${tier.label} ደረጃ — ሙሉ ሰሌዳ (ዙር ${round})</b>\n⏰ <i>${new Date().toLocaleString('en-US', { timeZone: 'Africa/Addis_Ababa' })}</i>`;
+  const header = `📋 <b>${tier.label} መደብ — የእጣ ወቅታዊ ዝርዝር (ዙር ${round})</b>\n⏰ <i>${new Date().toLocaleString('en-US', { timeZone: 'Africa/Addis_Ababa' })}</i>`;
   
   const CHUNK = 40;
   try {
@@ -262,7 +262,7 @@ function numbersGridKeyboard(tierCode, round, page) {
   if (end < 100) nav.push(Markup.button.callback('ወደፊት ▶️', `pg:${tierCode}:${page + 1}`));
   if (nav.length) buttons.push(nav);
 
-  buttons.push([Markup.button.callback('📋 ዝርዝር (ስልክ)', `board:${tierCode}`)]);
+  buttons.push([Markup.button.callback('📋 ክፍት እና የተያዙ የእጣ ዝርዝሮችን ለማየት', `board:${tierCode}`)]);
   buttons.push([Markup.button.callback('🔙 ወደ ኋላ ተመለስ', 'menu')]);
 
   return Markup.inlineKeyboard(buttons);
@@ -339,7 +339,7 @@ bot.action('noop', (ctx) => ctx.answerCbQuery('ይህ ቁጥር አስቀድሞ 
 bot.action('menu', async (ctx) => {
   await ctx.answerCbQuery();
   await typing(ctx);
-  await ctx.editMessageText('ደረጃ ይምረጡ፦', mainMenuKeyboard());
+  await ctx.editMessageText('መደብ ይምረጡ፦', mainMenuKeyboard());
 });
 
 bot.action(/^tier:a$/, async (ctx) => {
@@ -363,7 +363,7 @@ bot.action(/^pg:a:(\d+)$/, async (ctx) => {
   const round = store.getCurrentRound(tierCode);
   const filled = store.countConfirmed(tierCode, round);
   await ctx.editMessageText(
-    `💎 <b>${TIERS[tierCode].label} ደረጃ</b>\n${gradientBar(filled)}  ${filled}/100\n\n` +
+    `💎 <b>${TIERS[tierCode].label} መደብ</b>\n${gradientBar(filled)}  ${filled}/100\n\n` +
       `ማንኛውንም ${ICON.free} ክፍት ቁጥር ይምረጡ (1–100)፦`,
     { parse_mode: 'HTML', ...numbersGridKeyboard(tierCode, round, page) }
   );
@@ -461,7 +461,7 @@ bot.action(/^pick:a:(\d+)$/, async (ctx) => {
       store.releaseNumber(tierCode, round, number, userId);
       clearCountdown(userId);
       pendingPhoneRequests.delete(userId);
-      const expiredText = `⌛ <b>ጊዜው አልቋል</b>\n\nቁጥር ${number} (${tier.label} ደረጃ) በሰዓቱ ስላልተረጋገጠ ቁጥሩ ተለቋል። ${ICON.free} ለሁሉም ሰው ክፍት ሆኗል — በማንኛውም ጊዜ ሌላ ቁጥር መምረጥ ይችላሉ።`;
+      const expiredText = `⌛ <b>ጊዜው አልቋል</b>\n\nቁጥር ${number} (${tier.label} መደብ) በሰዓቱ ስላልተረጋገጠ ቁጥሩ ተለቋል። ${ICON.free} ለሁሉም ሰው ክፍት ሆኗል — በማንኛውም ጊዜ ሌላ ቁጥር መምረጥ ይችላሉ።`;
       try {
         await bot.telegram.editMessageText(sent.chat.id, sent.message_id, undefined, expiredText, { parse_mode: 'HTML' });
       } catch (e) {
@@ -519,7 +519,7 @@ bot.on('text', async (ctx) => {
           countdown.chatId,
           countdown.messageId,
           undefined,
-          `${ICON.pending} <b>በክለሳ ላይ</b>\n\nቁጥር <b>${boldNumber(number)}</b> — ${tier.label} ደረጃ\n<blockquote>የግብይት ቁጥር፦ <code>${txnId}</code>\nስልክ፦ <code>${masked}</code></blockquote>`,
+          `${ICON.pending} <b>በክለሳ ላይ</b>\n\nቁጥር <b>${boldNumber(number)}</b> — ${tier.label} መድብ\n<blockquote>የግብይት ቁጥር፦ <code>${txnId}</code>\nስልክ፦ <code>${masked}</code></blockquote>`,
           { parse_mode: 'HTML' }
         );
       } catch (e) { /* ignore */ }
@@ -698,7 +698,7 @@ async function runDraw(tierCode, round) {
     try {
       await bot.telegram.sendMessage(
         winnerRow.user_id,
-        `🏆 <b>እንኳን ደስ አለዎት!</b>\n\nበቁጥር ${boldNumber(winnerRow.number)} የ${tier.label} ደረጃ ዕጣውን አሸንፈዋል! አስተዳዳሪያችን በቅርቡ ያገኝዎታል። 🍾`,
+        `🏆 <b>እንኳን ደስ አለዎት!</b>\n\nበቁጥር ${boldNumber(winnerRow.number)} የ${tier.label} ዕጣውን አሸንፈዋል! አስተዳዳሪያችን በቅርቡ ያገኝዎታል። 🍾`,
         { parse_mode: 'HTML' }
       );
     } catch (e) {}
