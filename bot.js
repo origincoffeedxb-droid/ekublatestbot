@@ -77,6 +77,31 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ---------- Payer phone number: capture, validate, mask ----------
+
+function normalizePhone(text) {
+  return text.replace(/[^\d+]/g, '');
+}
+
+function isValidPhone(text) {
+  const digits = text.replace(/\D/g, '');
+  return digits.length >= 9 && digits.length <= 13;
+}
+
+// Shows only the first 3 and last 3 digits — e.g. 0912345678 -> 091****678
+function maskPhone(phone) {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 6) return digits;
+  const first3 = digits.slice(0, 3);
+  const last3 = digits.slice(-3);
+  const maskLen = Math.max(digits.length - 6, 3);
+  return `${first3}${'*'.repeat(maskLen)}${last3}`;
+}
+
+// Tracks users who've submitted a txn ID and are now expected to send the
+// phone number they paid from, before the submission is finalized.
+const pendingPhoneRequests = new Map(); // userId -> { tierCode, round, number, txnId }
+
 // Best-effort "bot is typing…" cue — purely cosmetic, never blocks the flow.
 function typing(ctx) {
   return ctx.sendChatAction('typing').catch(() => {});
@@ -200,6 +225,7 @@ function numbersGridKeyboard(tierCode, round, page) {
   if (end < 100) nav.push(Markup.button.callback('ወደፊት ▶️', `pg:${tierCode}:${page + 1}`));
   if (nav.length) buttons.push(nav);
 
+  buttons.push([Markup.button.callback('📋 ዝርዝር (ስልክ)', `board:${tierCode}`)]);
   buttons.push([Markup.button.callback('🔙 ወደ ደረጃዎች ተመለስ', 'menu')]);
 
   return Markup.inlineKeyboard(buttons);
@@ -259,9 +285,10 @@ function mynumberReply(ctx) {
   if (!lock) return ctx.reply('❕ አሁን ምንም ንቁ ማስያዝ የለዎትም።');
   const row = store.getNumberRow(lock.tier, lock.round, lock.number);
   const status = row ? (STATUS_LABEL[row.status] || row.status) : 'የማይታወቅ';
+  const phoneLine = row && row.phone ? `\nስልክ፦ <code>${maskPhone(row.phone)}</code>` : '';
   ctx.reply(
     `📍 <b>የእርስዎ ማስያዝ</b>\n\n` +
-      `<blockquote>ቁጥር <b>${boldNumber(lock.number)}</b> — ${TIERS[lock.tier].label} ደረጃ\nሁኔታ፦ ${status}</blockquote>`,
+      `<blockquote>ቁጥር <b>${boldNumber(lock.number)}</b> — ${TIERS[lock.tier].label} ደረጃ\nሁኔታ፦ ${status}${phoneLine}</blockquote>`,
     { parse_mode: 'HTML' }
   );
 }
@@ -305,6 +332,31 @@ bot.action(/^pg:([a-c]):(\d+)$/, async (ctx) => {
   );
 });
 
+bot.action(/^board:([a-c])$/, async (ctx) => {
+  const tierCode = ctx.match[1];
+  await ctx.answerCbQuery();
+  await typing(ctx);
+  const round = store.getCurrentRound(tierCode);
+  const rows = store
+    .getTierNumbers(tierCode, round)
+    .filter((r) => r.status === 'pending' || r.status === 'confirmed')
+    .sort((a, b) => a.number - b.number);
+
+  let text;
+  if (rows.length === 0) {
+    text = `📋 <b>${TIERS[tierCode].label} ደረጃ — ዝርዝር</b>\n\nእስካሁን የተያዘ ቁጥር የለም — ሁሉም ${ICON.open} ክፍት ናቸው።`;
+  } else {
+    const lines = rows.map((r) => {
+      const masked = r.phone ? maskPhone(r.phone) : '—';
+      const icon = r.status === 'confirmed' ? ICON.confirmed : ICON.pending;
+      return `${icon} ${String(r.number).padStart(3, '0')}   📱 ${masked}`;
+    });
+    text = `📋 <b>${TIERS[tierCode].label} ደረጃ — ዝርዝር</b>\n\n<blockquote>${lines.join('\n')}</blockquote>\n\nሌላው ሁሉ ${ICON.open} ክፍት ነው።`;
+  }
+
+  await ctx.reply(text, { parse_mode: 'HTML' });
+});
+
 bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
   const tierCode = ctx.match[1];
   const number = parseInt(ctx.match[2], 10);
@@ -345,7 +397,8 @@ bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
     if (row && row.status === 'locked') {
       store.releaseNumber(tierCode, round, number, userId);
       clearCountdown(userId);
-      const expiredText = `⌛ <b>ጊዜው አልቋል</b>\n\nቁጥር ${number} (${tier.label} ደረጃ) በሰዓቱ ስላልተረጋገጠ ተለቋል። በማንኛውም ጊዜ ሌላ ቁጥር መምረጥ ይችላሉ።`;
+      pendingPhoneRequests.delete(userId);
+      const expiredText = `⌛ <b>ጊዜው አልቋል</b>\n\nቁጥር ${number} (${tier.label} ደረጃ) በሰዓቱ ስላልተረጋገጠ ተለቋል። ${ICON.open} ለሁሉም ሰው ክፍት ሆኗል — በማንኛውም ጊዜ ሌላ ቁጥር መምረጥ ይችላሉ።`;
       try {
         await bot.telegram.editMessageText(sent.chat.id, sent.message_id, undefined, expiredText, { parse_mode: 'HTML' });
       } catch (e) {
@@ -357,9 +410,75 @@ bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
   }, LOCK_MINUTES * 60 * 1000);
 });
 
-// User sends their Telebirr transaction ID as a plain text message
+// Reservation completion is now two steps: (1) the Telebirr transaction ID,
+// then (2) the phone number that was used to pay, so it can be masked and
+// shown next to the number on the board / pushed to the channel.
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
+
+  // Step 2: we already have a txn ID for this user and are waiting on the phone number
+  const awaitingPhone = pendingPhoneRequests.get(userId);
+  if (awaitingPhone) {
+    const { tierCode, round, number, txnId } = awaitingPhone;
+    const row = store.getNumberRow(tierCode, round, number);
+    if (!row || row.status !== 'locked') {
+      pendingPhoneRequests.delete(userId);
+      return ctx.reply('ይህ ማስያዝ ጊዜው አልፎበታል ወይም ተቀይሯል። እባክዎ ከመጀመሪያው ይሞክሩ።');
+    }
+
+    const phoneText = ctx.message.text.trim();
+    if (!isValidPhone(phoneText)) {
+      return ctx.reply('ይህ ትክክለኛ የስልክ ቁጥር አይመስልም። እባክዎ የከፈሉበትን ስልክ ቁጥር በትክክል ያስገቡ (ለምሳሌ 0912345678)።');
+    }
+
+    pendingPhoneRequests.delete(userId);
+    const phone = normalizePhone(phoneText);
+    store.setPayerPhone(tierCode, round, number, phone);
+    store.submitTxn(tierCode, round, number, txnId);
+
+    const masked = maskPhone(phone);
+    const tier = TIERS[tierCode];
+
+    const countdown = clearCountdown(userId);
+    if (countdown) {
+      try {
+        await bot.telegram.editMessageText(
+          countdown.chatId,
+          countdown.messageId,
+          undefined,
+          `${ICON.pending} <b>በክለሳ ላይ</b>\n\nቁጥር <b>${boldNumber(number)}</b> — ${tier.label} ደረጃ\n<blockquote>የግብይት ቁጥር፦ <code>${txnId}</code>\nስልክ፦ <code>${masked}</code></blockquote>`,
+          { parse_mode: 'HTML' }
+        );
+      } catch (e) { /* ignore */ }
+    }
+
+    await typing(ctx);
+    await ctx.reply('📨 <b>ደርሶናል!</b> ክፍያዎ አሁን በአስተዳዳሪ በክለሳ ላይ ነው። ሲረጋገጥ ይነገርዎታል።', { parse_mode: 'HTML' });
+
+    try {
+      await bot.telegram.sendMessage(
+        ADMIN_CHAT_ID,
+        `🆕 <b>አዲስ ክፍያ ገብቷል</b>\n\n` +
+          `<blockquote>ደረጃ፦ ${tier.label}\nቁጥር፦ ${number}\nተጠቃሚ፦ ${displayName(ctx.from)} (id ${userId})\nየግብይት መታወቂያ፦ <code>${txnId}</code>\nስልክ፦ <code>${masked}</code></blockquote>\n\n` +
+          `ከማጽደቅዎ በፊት ከቴሌብር ዝርዝርዎ ጋር እባክዎ ያረጋግጡ።`,
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            Markup.button.callback('✅ አጽድቅ', `appr:${tierCode}:${number}`),
+            Markup.button.callback('❌ አትቀበል', `rej:${tierCode}:${number}`),
+          ]),
+        }
+      );
+    } catch (e) {
+      console.error('Failed to notify admin chat — check ADMIN_CHAT_ID is set correctly:', e.message);
+      await ctx.reply(
+        'ማመልከቻዎ ደርሶናል፣ ነገር ግን አሁን የአስተዳዳሪ ቡድኑን ማግኘት አልቻልንም። እባክዎ ከግብይት ቁጥርዎ ጋር በቀጥታ ድጋፍን ያግኙ።'
+      );
+    }
+    return;
+  }
+
+  // Step 1: user sends their Telebirr transaction ID
   const lock = store.getActiveLock(userId);
   if (!lock) return; // not in the middle of a reservation — ignore
 
@@ -373,45 +492,9 @@ bot.on('text', async (ctx) => {
     return ctx.reply('ይህ ትክክለኛ የግብይት ቁጥር አይመስልም። እባክዎ የቴሌብር ግብይት መታወቂያውን ይላኩ።');
   }
 
-  store.submitTxn(lock.tier, lock.round, lock.number, txnId);
-
-  const countdown = clearCountdown(userId);
-  if (countdown) {
-    try {
-      await bot.telegram.editMessageText(
-        countdown.chatId,
-        countdown.messageId,
-        undefined,
-        `${ICON.pending} <b>በክለሳ ላይ</b>\n\nቁጥር <b>${boldNumber(lock.number)}</b> — ${TIERS[lock.tier].label} ደረጃ\n<blockquote>የግብይት ቁጥር፦ <code>${txnId}</code></blockquote>`,
-        { parse_mode: 'HTML' }
-      );
-    } catch (e) { /* ignore */ }
-  }
-
+  pendingPhoneRequests.set(userId, { tierCode: lock.tier, round: lock.round, number: lock.number, txnId });
   await typing(ctx);
-  await ctx.reply('📨 <b>ደርሶናል!</b> ክፍያዎ አሁን በአስተዳዳሪ በክለሳ ላይ ነው። ሲረጋገጥ ይነገርዎታል።', { parse_mode: 'HTML' });
-
-  const tier = TIERS[lock.tier];
-  try {
-    await bot.telegram.sendMessage(
-      ADMIN_CHAT_ID,
-      `🆕 <b>አዲስ ክፍያ ገብቷል</b>\n\n` +
-        `<blockquote>ደረጃ፦ ${tier.label}\nቁጥር፦ ${lock.number}\nተጠቃሚ፦ ${displayName(ctx.from)} (id ${userId})\nየግብይት መታወቂያ፦ <code>${txnId}</code></blockquote>\n\n` +
-        `ከማጽደቅዎ በፊት ከቴሌብር ዝርዝርዎ ጋር እባክዎ ያረጋግጡ።`,
-      {
-        parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([
-          Markup.button.callback('✅ አጽድቅ', `appr:${lock.tier}:${lock.number}`),
-          Markup.button.callback('❌ አትቀበል', `rej:${lock.tier}:${lock.number}`),
-        ]),
-      }
-    );
-  } catch (e) {
-    console.error('Failed to notify admin chat — check ADMIN_CHAT_ID is set correctly:', e.message);
-    await ctx.reply(
-      'ማመልከቻዎ ደርሶናል፣ ነገር ግን አሁን የአስተዳዳሪ ቡድኑን ማግኘት አልቻልንም። እባክዎ ከግብይት ቁጥርዎ ጋር በቀጥታ ድጋፍን ያግኙ።'
-    );
-  }
+  await ctx.reply('📱 አመሰግናለሁ! አሁን የከፈሉበትን የቴሌብር ስልክ ቁጥር ይላኩልን (ለምሳሌ 0912345678)።');
 });
 
 // ---------- Admin approve/reject ----------
@@ -435,6 +518,8 @@ bot.action(/^appr:([a-c]):(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery('✅ ተረጋግጧል።');
   await ctx.editMessageText(ctx.callbackQuery.message.text + '\n\n✅ ጸድቋል');
 
+  const tier = TIERS[tierCode];
+
   if (row.user_id) {
     try {
       const sent = await bot.telegram.sendMessage(row.user_id, '🔍 <b>ክፍያዎ በማረጋገጥ ላይ...</b>', { parse_mode: 'HTML' });
@@ -443,10 +528,25 @@ bot.action(/^appr:([a-c]):(\d+)$/, async (ctx) => {
         row.user_id,
         sent.message_id,
         undefined,
-        `🎉 <b>ተረጋግጧል!</b>\n\nለቁጥር ${boldNumber(number)} (${TIERS[tierCode].label} ደረጃ) ያደረጉት ክፍያ ተረጋግጧል! በይፋ በዕጣው ውስጥ ገብተዋል። መልካም ዕድል! 🍀`,
+        `🎉 <b>ተረጋግጧል!</b>\n\nለቁጥር ${boldNumber(number)} (${tier.label} ደረጃ) ያደረጉት ክፍያ ተረጋግጧል! በይፋ በዕጣው ውስጥ ገብተዋል። መልካም ዕድል! 🍀`,
         { parse_mode: 'HTML' }
       );
     } catch (e) { /* ignore */ }
+  }
+
+  // Push a confirmation update to the channel: number + masked payer phone
+  if (ANNOUNCE_CHAT_ID) {
+    const masked = row.phone ? maskPhone(row.phone) : null;
+    try {
+      await bot.telegram.sendMessage(
+        ANNOUNCE_CHAT_ID,
+        `${ICON.confirmed} <b>ቁጥር ${boldNumber(number)} ተረጋግጧል</b> — ${tier.label} ደረጃ` +
+          (masked ? `\n📱 <code>${masked}</code>` : ''),
+        { parse_mode: 'HTML' }
+      );
+    } catch (e) {
+      console.error('Could not post confirmation to ANNOUNCE_CHAT_ID:', e.message);
+    }
   }
 
   const confirmed = store.countConfirmed(tierCode, round);
@@ -556,6 +656,7 @@ setInterval(() => {
   for (const row of expired) {
     store.releaseNumber(row.tier, row.round, row.number, row.user_id);
     clearCountdown(row.user_id);
+    pendingPhoneRequests.delete(row.user_id);
     if (row.user_id) {
       bot.telegram
         .sendMessage(
