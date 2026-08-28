@@ -444,6 +444,16 @@ bot.action(/^pick:a:(\d+)$/, async (ctx) => {
     /* ignore */
   }
 
+  // Send explicit instruction for transaction ID
+  await sleep(500);
+  await ctx.reply(
+    `<b>🔢 ሁለት ነገር ይልክልን፦</b>\n\n` +
+    `1️⃣ <b>የቴሌብር ግብይት ቁጥር</b> (ለምሳሌ: TRX123456789)\n` +
+    `2️⃣ <b>ከፈሉበት ስልክ ቁጥር</b> (ለምሳሌ: 0912345678)\n\n` +
+    `⏰ ጊዜ አለዎ ${LOCK_MINUTES} ደቂቃዎች!`,
+    { parse_mode: 'HTML' }
+  );
+
   startCountdown(userId, sent.chat.id, sent.message_id, tierCode, round, number, expiry);
 
   setTimeout(async () => {
@@ -477,12 +487,22 @@ bot.on('text', async (ctx) => {
     const row = store.getNumberRow(tierCode, round, number);
     if (!row || row.status !== 'locked') {
       pendingPhoneRequests.delete(userId);
-      return ctx.reply('ይህ ማስያዝ ጊዜው አልፎበታል ወይም ተቀይሯል። እባክዎ ከመጀመሪያው ይሞክሩ።');
+      return ctx.reply(
+        `⚠️ <b>ይህ ማስያዝ ጊዜው አልፎበታል ወይም ተቀይሯል።</b>\n\n` +
+        `እባክዎ ከመጀመሪያው ይሞክሩ — ሌላ ቁጥር ይምረጡ።`,
+        { parse_mode: 'HTML' }
+      );
     }
 
     const phoneText = ctx.message.text.trim();
     if (!isValidPhone(phoneText)) {
-      return ctx.reply('ይህ ትክክለኛ የስልክ ቁጥር አይመስልም። እባክዎ የከፈሉበትን ስልክ ቁጥር በትክክል ያስገቡ (ለምሳሌ 0912345678)።');
+      return ctx.reply(
+        `❌ <b>ይህ ትክክለኛ ስልክ ቁጥር አይመስልም።</b>\n\n` +
+        `እባክዎ የከፈሉበትን ስልክ ቁጥር በትክክል ያስገቡ:\n` +
+        `<code>0912345678</code>\n` +
+        `ወይም ሌላ ትክክለኛ ቦታ።`,
+        { parse_mode: 'HTML' }
+      );
     }
 
     pendingPhoneRequests.delete(userId);
@@ -507,7 +527,12 @@ bot.on('text', async (ctx) => {
     }
 
     await typing(ctx);
-    await ctx.reply('📨 <b>ደርሶናል!</b> ክፍያዎ አሁን በአስተዳዳሪ በክለሳ ላይ ነው። ሲረጋገጥ ይነገርዎታል።', { parse_mode: 'HTML' });
+    await ctx.reply(
+      `✅ <b>ተቀበልናል!</b>\n\n` +
+      `<blockquote>ግብይት ቁጥር: <code>${txnId}</code>\nስልክ: <code>${masked}</code></blockquote>\n\n` +
+      `📨 ክፍያዎ አሁን በአስተዳዳሪ በክለሳ ላይ ነው። ሲረጋገጥ ይነገርዎታል።`,
+      { parse_mode: 'HTML' }
+    );
 
     try {
       await bot.telegram.sendMessage(
@@ -543,12 +568,16 @@ bot.on('text', async (ctx) => {
 
   const txnId = ctx.message.text.trim();
   if (txnId.length < 4) {
-    return ctx.reply('ይህ ትክክለኛ የግብይት ቁጥር አይመስልም። እባክዎ የቴሌብር ግብይት መታወቂያውን ይላኩ።');
+    return ctx.reply('ይህ ትክክለኛ የግብይት ቁጥር አይመስልም። እባክዎ የቴሌብር ግብይት መታወቂያውን ይላኩ (ለምሳሌ: TRX123456789)።');
   }
 
   pendingPhoneRequests.set(userId, { tierCode: lock.tier, round: lock.round, number: lock.number, txnId });
   await typing(ctx);
-  await ctx.reply('📱 አመሰግናለሁ! አሁን የከፈሉበትን የቴሌብር ስልክ ቁጥር ይላኩልን (ለምሳሌ 0912345678)።');
+  await ctx.reply(
+    `✅ <b>ግብይት ቁጥር ተቀበልናል!</b>\n\n` +
+    `📱 አሁን <b>ከፈሉበት ስልክ ቁጥር</b> ይላኩልን (ለምሳሌ: 0912345678)።`,
+    { parse_mode: 'HTML' }
+  );
 });
 
 // ---------- Admin approve/reject ----------
