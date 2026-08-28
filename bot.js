@@ -271,7 +271,7 @@ function numbersGridKeyboard(tierCode, round, page) {
 // Persistent bottom menu (reply keyboard) — gives the bot an "app" feel.
 function replyMenu() {
   return Markup.keyboard([
-    ['🎟️ ቁጥር ለማስያዝ', '📍 የመረጡትን ቁጥር ለማየት'],
+    ['🎟️ ቁጥር ለመያዝ', '📍 የመረጡትን ቁጥር ለማየት'],
     ['❓ ጥያቄ ወይም እገዛ ለማግኘት'],
   ]).resize();
 }
