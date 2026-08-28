@@ -23,8 +23,6 @@ const bot = new Telegraf(BOT_TOKEN);
 // Short tier codes keep Telegram callback_data under the 64-byte limit.
 const TIERS = {
   a: { amount: 200, label: '200 ብር' },
-  b: { amount: 500, label: '500 ብር' },
-  c: { amount: 1000, label: '1000 ብር' },
 };
 const PAGE_SIZE = 50; // numbers per page (5 rows x 10)
 
@@ -43,6 +41,7 @@ function displayName(from) {
 const ICON = {
   free: '🟢',
   taken: '🔴',
+  pending: '🟡',
 };
 
 const STATUS_LABEL = {
@@ -186,11 +185,16 @@ async function postFullBoardToChannel(tierCode, round) {
   for (let n = 1; n <= 100; n++) {
     const r = byNumber[n];
     if (!r) {
-      lines.push(`${ICON.free} ${String(n).padStart(3, '0')}  ក្រុម`);
-    } else {
+      // Free number — show green icon + number + "አልተያዘም" (not reserved)
+      lines.push(`${ICON.free} ${String(n).padStart(3, '0')}  አልተያዘም`);
+    } else if (r.status === 'pending') {
+      // Pending number — show yellow icon + number + phone + "በክለሳ ላይ"
       const masked = r.phone ? maskPhone(r.phone) : '—';
-      const status = r.status === 'pending' ? ' · በክለሳ ላይ' : '';
-      lines.push(`${ICON.taken} ${String(n).padStart(3, '0')}  📱 ${masked}${status}`);
+      lines.push(`${ICON.pending} ${String(n).padStart(3, '0')}  📱 ${masked}  በክለሳ ላይ`);
+    } else {
+      // Confirmed number — show red icon + number + phone + "ተይዟል" (reserved)
+      const masked = r.phone ? maskPhone(r.phone) : '—';
+      lines.push(`${ICON.taken} ${String(n).padStart(3, '0')}  📱 ${masked}  ተይዟል`);
     }
   }
 
@@ -213,13 +217,14 @@ async function postFullBoardToChannel(tierCode, round) {
 // ---------- Keyboards ----------
 
 function mainMenuKeyboard() {
-  const buttons = Object.entries(TIERS).map(([code, t]) => {
-    const round = store.getCurrentRound(code);
-    const filled = store.countConfirmed(code, round);
-    const bar = gradientBar(filled, 100, 5);
-    return [Markup.button.callback(`💎 ${t.label}  ${bar}  ${filled}/100`, `tier:${code}`)];
-  });
-  return Markup.inlineKeyboard(buttons);
+  const tierCode = 'a';
+  const tier = TIERS[tierCode];
+  const round = store.getCurrentRound(tierCode);
+  const filled = store.countConfirmed(tierCode, round);
+  const bar = gradientBar(filled, 100, 5);
+  return Markup.inlineKeyboard([
+    [Markup.button.callback(`💎 ${tier.label}  ${bar}  ${filled}/100`, `tier:${tierCode}`)],
+  ]);
 }
 
 function numbersGridKeyboard(tierCode, round, page) {
@@ -327,7 +332,7 @@ function mynumberReply(ctx) {
 bot.command('mynumber', mynumberReply);
 bot.hears('📍 ማስያዜ', mynumberReply);
 
-bot.hears('❓ እገዛ', (ctx) => ctx.reply('🛟 ድጋፍ ካስፈለገዎት፦ @yourusername'));
+bot.hears('❓ እገዛ', (ctx) => ctx.reply('🛟 ድጋፍ ካስፈለገዎት፦ @eletawiequbsupport'));
 
 bot.action('noop', (ctx) => ctx.answerCbQuery('ይህ ቁጥር አስቀድሞ ተይዟል።'));
 
@@ -337,8 +342,8 @@ bot.action('menu', async (ctx) => {
   await ctx.editMessageText('ደረጃ ይምረጡ፦', mainMenuKeyboard());
 });
 
-bot.action(/^tier:([a-c])$/, async (ctx) => {
-  const tierCode = ctx.match[1];
+bot.action(/^tier:a$/, async (ctx) => {
+  const tierCode = 'a';
   await ctx.answerCbQuery();
   await typing(ctx);
   const round = store.getCurrentRound(tierCode);
@@ -350,9 +355,9 @@ bot.action(/^tier:([a-c])$/, async (ctx) => {
   );
 });
 
-bot.action(/^pg:([a-c]):(\d+)$/, async (ctx) => {
-  const tierCode = ctx.match[1];
-  const page = parseInt(ctx.match[2], 10);
+bot.action(/^pg:a:(\d+)$/, async (ctx) => {
+  const tierCode = 'a';
+  const page = parseInt(ctx.match[1], 10);
   await ctx.answerCbQuery();
   await typing(ctx);
   const round = store.getCurrentRound(tierCode);
@@ -377,11 +382,16 @@ async function sendBoard(ctx, tierCode) {
   for (let n = 1; n <= 100; n++) {
     const r = byNumber[n];
     if (!r) {
-      lines.push(`${ICON.free} ${String(n).padStart(3, '0')}  ክፍት`);
-    } else {
+      // Free number — show green icon + number + "አልተያዘም" (not reserved)
+      lines.push(`${ICON.free} ${String(n).padStart(3, '0')}  አልተያዘም`);
+    } else if (r.status === 'pending') {
+      // Pending number — show yellow icon + number + phone + "በክለሳ ላይ"
       const masked = r.phone ? maskPhone(r.phone) : '—';
-      const note = r.status === 'pending' ? ' · በክለሳ ላይ' : '';
-      lines.push(`${ICON.taken} ${String(n).padStart(3, '0')}  📱 ${masked}${note}`);
+      lines.push(`${ICON.pending} ${String(n).padStart(3, '0')}  📱 ${masked}  በክለሳ ላይ`);
+    } else {
+      // Confirmed number — show red icon + number + phone + "ተይዟል" (reserved)
+      const masked = r.phone ? maskPhone(r.phone) : '—';
+      lines.push(`${ICON.taken} ${String(n).padStart(3, '0')}  📱 ${masked}  ተይዟል`);
     }
   }
 
@@ -394,16 +404,16 @@ async function sendBoard(ctx, tierCode) {
   }
 }
 
-bot.action(/^board:([a-c])$/, async (ctx) => {
-  const tierCode = ctx.match[1];
+bot.action(/^board:a$/, async (ctx) => {
+  const tierCode = 'a';
   await ctx.answerCbQuery();
   await typing(ctx);
   await sendBoard(ctx, tierCode);
 });
 
-bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
-  const tierCode = ctx.match[1];
-  const number = parseInt(ctx.match[2], 10);
+bot.action(/^pick:a:(\d+)$/, async (ctx) => {
+  const tierCode = 'a';
+  const number = parseInt(ctx.match[1], 10);
   const tier = TIERS[tierCode];
   const userId = ctx.from.id;
 
@@ -547,10 +557,10 @@ function isAdminChat(ctx) {
   return String(ctx.chat.id) === String(ADMIN_CHAT_ID);
 }
 
-bot.action(/^appr:([a-c]):(\d+)$/, async (ctx) => {
+bot.action(/^appr:a:(\d+)$/, async (ctx) => {
   if (!isAdminChat(ctx)) return ctx.answerCbQuery('Admins only.', { show_alert: true });
-  const tierCode = ctx.match[1];
-  const number = parseInt(ctx.match[2], 10);
+  const tierCode = 'a';
+  const number = parseInt(ctx.match[1], 10);
   const round = store.getCurrentRound(tierCode);
   const row = store.getNumberRow(tierCode, round, number);
   if (!row || row.status !== 'pending') {
@@ -587,10 +597,10 @@ bot.action(/^appr:([a-c]):(\d+)$/, async (ctx) => {
   }
 });
 
-bot.action(/^rej:([a-c]):(\d+)$/, async (ctx) => {
+bot.action(/^rej:a:(\d+)$/, async (ctx) => {
   if (!isAdminChat(ctx)) return ctx.answerCbQuery('Admins only.', { show_alert: true });
-  const tierCode = ctx.match[1];
-  const number = parseInt(ctx.match[2], 10);
+  const tierCode = 'a';
+  const number = parseInt(ctx.match[1], 10);
   const round = store.getCurrentRound(tierCode);
   const row = store.getNumberRow(tierCode, round, number);
   if (!row || row.status !== 'pending') {
@@ -672,11 +682,7 @@ async function runDraw(tierCode, round) {
 // Admin-only manual command to force-start a fresh round for a tier (e.g. to reset a stalled one)
 bot.command('newround', async (ctx) => {
   if (!isAdminChat(ctx)) return;
-  const parts = ctx.message.text.split(' ');
-  const tierCode = parts[1];
-  if (!TIERS[tierCode]) {
-    return ctx.reply('Usage: /newround a|b|c   (a=200 ብር, b=500 ብር, c=1000 ብር)');
-  }
+  const tierCode = 'a';
   const next = store.startNewRound(tierCode);
   ctx.reply(`ለ${TIERS[tierCode].label} ደረጃ ዙር ${next} ተጀምሯል። ሁሉም ቁጥሮች እንደገና ክፍት ናቸው።`);
 });
