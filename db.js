@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS numbers (
   username TEXT,
   locked_at INTEGER,
   txn_id TEXT,
+  phone TEXT, -- phone number the payer sent Telebirr from
   PRIMARY KEY (tier, round, number)
 );
 
@@ -40,6 +41,14 @@ CREATE TABLE IF NOT EXISTS winners (
   drawn_at INTEGER NOT NULL
 );
 `);
+
+// Migration: databases created before the phone-capture feature won't have
+// this column yet — CREATE TABLE IF NOT EXISTS above is a no-op on tables
+// that already exist, so add it here if it's missing.
+const hasPhoneColumn = db.prepare("PRAGMA table_info(numbers)").all().some((col) => col.name === 'phone');
+if (!hasPhoneColumn) {
+  db.exec('ALTER TABLE numbers ADD COLUMN phone TEXT');
+}
 
 function getCurrentRound(tier) {
   const row = db.prepare('SELECT current_round FROM tier_state WHERE tier = ?').get(tier);
@@ -84,6 +93,12 @@ function releaseNumber(tier, round, number, userId) {
     if (userId) db.prepare('DELETE FROM active_locks WHERE user_id = ?').run(userId);
   });
   tx();
+}
+
+function setPayerPhone(tier, round, number, phone) {
+  db.prepare(
+    `UPDATE numbers SET phone = ? WHERE tier = ? AND round = ? AND number = ?`
+  ).run(phone, tier, round, number);
 }
 
 function submitTxn(tier, round, number, txnId) {
@@ -147,6 +162,7 @@ module.exports = {
   getActiveLock,
   lockNumber,
   releaseNumber,
+  setPayerPhone,
   submitTxn,
   confirmNumber,
   countConfirmed,
