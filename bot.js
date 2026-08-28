@@ -174,6 +174,42 @@ function startCountdown(userId, chatId, messageId, tierCode, round, number, expi
   activeCountdowns.set(userId, { intervalId, chatId, messageId, tierCode, round, number, expiry });
 }
 
+// ---------- NEW: Generate and send full board to announcement channel ----------
+async function postFullBoardToChannel(tierCode, round) {
+  if (!ANNOUNCE_CHAT_ID) return;
+
+  const rows = store.getTierNumbers(tierCode, round);
+  const byNumber = {};
+  for (const r of rows) byNumber[r.number] = r;
+
+  const lines = [];
+  for (let n = 1; n <= 100; n++) {
+    const r = byNumber[n];
+    if (!r) {
+      lines.push(`${ICON.free} ${String(n).padStart(3, '0')}  ក្រុម`);
+    } else {
+      const masked = r.phone ? maskPhone(r.phone) : '—';
+      const status = r.status === 'pending' ? ' · በክለሳ ላይ' : '';
+      lines.push(`${ICON.taken} ${String(n).padStart(3, '0')}  📱 ${masked}${status}`);
+    }
+  }
+
+  const tier = TIERS[tierCode];
+  const header = `📋 <b>${tier.label} ደረጃ — ሙሉ ሰሌዳ (ዙር ${round})</b>\n⏰ <i>${new Date().toLocaleString('en-US', { timeZone: 'Africa/Addis_Ababa' })}</i>`;
+  
+  const CHUNK = 40;
+  try {
+    for (let i = 0; i < lines.length; i += CHUNK) {
+      const chunk = lines.slice(i, i + CHUNK);
+      const text = (i === 0 ? header + '\n\n' : '') + `<blockquote>${chunk.join('\n')}</blockquote>`;
+      await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, text, { parse_mode: 'HTML' });
+      if (i + CHUNK < lines.length) await sleep(200); // brief delay between chunks
+    }
+  } catch (e) {
+    console.error('Could not post full board to ANNOUNCE_CHAT_ID:', e.message);
+  }
+}
+
 // ---------- Keyboards ----------
 
 function mainMenuKeyboard() {
@@ -251,7 +287,7 @@ bot.start(async (ctx) => {
   const welcomeText =
     `✨ <b>እንኳን ወደ ${TELEBIRR_NAME} ዕለታዊ ዕጣ በደህና መጡ!</b> 🎉\n\n` +
     `ከታች ያለውን ደረጃ ይምረጡ፣ ከዚያም ${ICON.free} ክፍት ቁጥር ከ<b>1</b> እስከ <b>100</b> ውስጥ ይያዙ። ` +
-    `ክፍያውን በቴሌብር በ<b>${LOCK_MINUTES} ደቂቃ</b> ውስጥ ልከው የግብይት ቁጥሩን ማስገባት ይኖርብዎታል። ` +
+    `ክፍያውን በቴሌብር በ<b>${LOCK_MINUTES} ደቂቃ</b> ውስጥ ልከው የግብይት ቁጥርዎን ማስገባት ይኖርብዎታል። ` +
     `በደረጃው ውስጥ ያሉት 100 ቁጥሮች ሁሉ ተከፍለው ሲረጋገጡ በራስ-ሰር አንድ አሸናፊ ይመረጣል።\n\n` +
     `<blockquote>${ICON.free} ክፍት   ${ICON.taken} ተይዟል</blockquote>\n\n` +
     `👇 ለመጀመር ደረጃ ይምረጡ፦`;
@@ -406,7 +442,7 @@ bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
       store.releaseNumber(tierCode, round, number, userId);
       clearCountdown(userId);
       pendingPhoneRequests.delete(userId);
-      const expiredText = `⌛ <b>ጊዜው አልቋል</b>\n\nቁጥር ${number} (${tier.label} ደረጃ) በሰዓቱ ስላልተረጋገጠ ተለቋል። ${ICON.open} ለሁሉም ሰው ክፍት ሆኗል — በማንኛውም ጊዜ ሌላ ቁጥር መምረጥ ይችላሉ።`;
+      const expiredText = `⌛ <b>ጊዜው አልቋል</b>\n\nቁጥር ${number} (${tier.label} ደረጃ) በሰዓቱ ስላልተረጋገጠ ተለቋል። ${ICON.free} ለሁሉም ሰው ክፍት ሆኗል — በማንኛውም ጊዜ ሌላ ቁጥር መምረጥ ይችላሉ።`;
       try {
         await bot.telegram.editMessageText(sent.chat.id, sent.message_id, undefined, expiredText, { parse_mode: 'HTML' });
       } catch (e) {
@@ -542,20 +578,8 @@ bot.action(/^appr:([a-c]):(\d+)$/, async (ctx) => {
     } catch (e) { /* ignore */ }
   }
 
-  // Push a confirmation update to the channel: number + masked payer phone
-  if (ANNOUNCE_CHAT_ID) {
-    const masked = row.phone ? maskPhone(row.phone) : null;
-    try {
-      await bot.telegram.sendMessage(
-        ANNOUNCE_CHAT_ID,
-        `${ICON.confirmed} <b>ቁጥር ${boldNumber(number)} ተረጋግጧል</b> — ${tier.label} ደረጃ` +
-          (masked ? `\n📱 <code>${masked}</code>` : ''),
-        { parse_mode: 'HTML' }
-      );
-    } catch (e) {
-      console.error('Could not post confirmation to ANNOUNCE_CHAT_ID:', e.message);
-    }
-  }
+  // Push the FULL board to the announcement channel after confirmation
+  await postFullBoardToChannel(tierCode, round);
 
   const confirmed = store.countConfirmed(tierCode, round);
   if (confirmed >= 100) {
