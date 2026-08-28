@@ -271,7 +271,7 @@ function numbersGridKeyboard(tierCode, round, page) {
 // Persistent bottom menu (reply keyboard) — gives the bot an "app" feel.
 function replyMenu() {
   return Markup.keyboard([
-    ['🎟️ ቁጥር ለመያዝ', '📍 የመረጡትን ቁጥር ለማየት'],
+    ['🎟️ ቁጥር ለመያዝ', '👁 የመረጡትን ቁጥር ለማየት'],
     ['❓ ጥያቄ ወይም እገዛ ለማግኘት'],
   ]).resize();
 }
@@ -313,9 +313,9 @@ bot.command('numbers', async (ctx) => {
   await typing(ctx);
   ctx.reply('ቁጥሮችን ይምረጡ፦', mainMenuKeyboard());
 });
-bot.hears('🎟️ ቁጥር ምረጥ', async (ctx) => {
+bot.hears('🎟️ ቁጥር ለመያዝ', async (ctx) => {
   await typing(ctx);
-  ctx.reply('ቁጥሮችን ለማየት ይምረጡ፦', mainMenuKeyboard());
+  ctx.reply('ቁጥሮችን ለመያዝ ይምረጡ፦', mainMenuKeyboard());
 });
 
 function mynumberReply(ctx) {
@@ -325,15 +325,15 @@ function mynumberReply(ctx) {
   const status = row ? (STATUS_LABEL[row.status] || row.status) : 'የማይታወቅ';
   const phoneLine = row && row.phone ? `\nስልክ፦ <code>${maskPhone(row.phone)}</code>` : '';
   ctx.reply(
-    `📍 <b>የእርስዎ ማስያዝ</b>\n\n` +
+    `👁  <b>የመረጡትን ቁጥር ለማየት</b>\n\n` +
       `<blockquote>ቁጥር <b>${boldNumber(lock.number)}</b> — ${TIERS[lock.tier].label} ደረጃ\nሁኔታ፦ ${status}${phoneLine}</blockquote>`,
     { parse_mode: 'HTML' }
   );
 }
 bot.command('mynumber', mynumberReply);
-bot.hears('📍 የያዙት ቁጥር', mynumberReply);
+bot.hears('👁 የመረጡትን ቁጥር ለማየት', mynumberReply);
 
-bot.hears('❓ እርዳታ መስመር', (ctx) => ctx.reply('🛟 እርዳታ ካስፈለገዎት ያነጋግሩን፦ @eletawiequbsupport'));
+bot.hears('❓ ጥያቄ ወይም እገዛ ለማግኘት', (ctx) => ctx.reply('🛟 እርዳታ ካስፈለገዎት ያነጋግሩን፦ @eletawiequbsupport'));
 
 bot.action('noop', (ctx) => ctx.answerCbQuery('ይህ ቁጥር አስቀድሞ ተይዟል።'));
 
