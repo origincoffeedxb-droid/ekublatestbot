@@ -41,10 +41,8 @@ function displayName(from) {
 // ============================================================
 
 const ICON = {
-  open: '💠',
-  locked: '🔒',
-  pending: '🟧',
-  confirmed: '⬛',
+  free: '🟢',
+  taken: '🔴',
 };
 
 const STATUS_LABEL = {
@@ -201,12 +199,10 @@ function numbersGridKeyboard(tierCode, round, page) {
   for (let n = start; n <= end; n++) {
     const status = statusByNumber[n];
     let icon;
-    // Open numbers get a bold "gem" chip look; taken/pending numbers stay
-    // visually muted/flat so the eye is drawn straight to what's available.
-    if (!status) icon = `${ICON.open}${boldNumber(n)}`; // open — actionable
-    else if (status === 'locked') icon = `${ICON.locked}${n}`; // reserved (temp hold)
-    else if (status === 'pending') icon = `${ICON.pending}${n}`; // payment under review
-    else icon = `${ICON.confirmed}${n}`; // confirmed / taken
+    // Green = free and pickable; red = taken (locked / under review / confirmed
+    // — all read the same from a picker's point of view: not available).
+    if (!status) icon = `${ICON.free}${boldNumber(n)}`; // free — actionable
+    else icon = `${ICON.taken}${n}`; // taken — not selectable
 
     if (status) {
       row.push(Markup.button.callback(icon, 'noop')); // not selectable
@@ -254,10 +250,10 @@ bot.start(async (ctx) => {
 
   const welcomeText =
     `✨ <b>እንኳን ወደ ${TELEBIRR_NAME} ዕለታዊ ዕጣ በደህና መጡ!</b> 🎉\n\n` +
-    `ከታች ያለውን ደረጃ ይምረጡ፣ ከዚያም ${ICON.open} ክፍት ቁጥር ከ<b>1</b> እስከ <b>100</b> ውስጥ ይያዙ። ` +
+    `ከታች ያለውን ደረጃ ይምረጡ፣ ከዚያም ${ICON.free} ክፍት ቁጥር ከ<b>1</b> እስከ <b>100</b> ውስጥ ይያዙ። ` +
     `ክፍያውን በቴሌብር በ<b>${LOCK_MINUTES} ደቂቃ</b> ውስጥ ልከው የግብይት ቁጥሩን ማስገባት ይኖርብዎታል። ` +
     `በደረጃው ውስጥ ያሉት 100 ቁጥሮች ሁሉ ተከፍለው ሲረጋገጡ በራስ-ሰር አንድ አሸናፊ ይመረጣል።\n\n` +
-    `<blockquote>${ICON.open} ክፍት   ${ICON.locked} ተይዟል   ${ICON.pending} በክለሳ ላይ   ${ICON.confirmed} ተረጋግጧል</blockquote>\n\n` +
+    `<blockquote>${ICON.free} ክፍት   ${ICON.taken} ተይዟል</blockquote>\n\n` +
     `👇 ለመጀመር ደረጃ ይምረጡ፦`;
 
   try {
@@ -313,7 +309,7 @@ bot.action(/^tier:([a-c])$/, async (ctx) => {
   const filled = store.countConfirmed(tierCode, round);
   await ctx.editMessageText(
     `💎 <b>${TIERS[tierCode].label} ደረጃ</b>\n${gradientBar(filled)}  ${filled}/100\n\n` +
-      `ማንኛውንም ${ICON.open} ክፍት ቁጥር ይምረጡ (1–100)፦`,
+      `ማንኛውንም ${ICON.free} ክፍት ቁጥር ይምረጡ (1–100)፦`,
     { parse_mode: 'HTML', ...numbersGridKeyboard(tierCode, round, 0) }
   );
 });
@@ -327,34 +323,46 @@ bot.action(/^pg:([a-c]):(\d+)$/, async (ctx) => {
   const filled = store.countConfirmed(tierCode, round);
   await ctx.editMessageText(
     `💎 <b>${TIERS[tierCode].label} ደረጃ</b>\n${gradientBar(filled)}  ${filled}/100\n\n` +
-      `ማንኛውንም ${ICON.open} ክፍት ቁጥር ይምረጡ (1–100)፦`,
+      `ማንኛውንም ${ICON.free} ክፍት ቁጥር ይምረጡ (1–100)፦`,
     { parse_mode: 'HTML', ...numbersGridKeyboard(tierCode, round, page) }
   );
 });
+
+// Full text board: every number 1–100, 🟢 free or 🔴 taken (with masked
+// phone for taken ones). Chunked so a fully-booked tier never risks
+// exceeding Telegram's per-message length limit.
+async function sendBoard(ctx, tierCode) {
+  const round = store.getCurrentRound(tierCode);
+  const rows = store.getTierNumbers(tierCode, round);
+  const byNumber = {};
+  for (const r of rows) byNumber[r.number] = r;
+
+  const lines = [];
+  for (let n = 1; n <= 100; n++) {
+    const r = byNumber[n];
+    if (!r) {
+      lines.push(`${ICON.free} ${String(n).padStart(3, '0')}  ክፍት`);
+    } else {
+      const masked = r.phone ? maskPhone(r.phone) : '—';
+      const note = r.status === 'pending' ? ' · በክለሳ ላይ' : '';
+      lines.push(`${ICON.taken} ${String(n).padStart(3, '0')}  📱 ${masked}${note}`);
+    }
+  }
+
+  const header = `📋 <b>${TIERS[tierCode].label} ደረጃ — ሙሉ ሰሌዳ</b>`;
+  const CHUNK = 40;
+  for (let i = 0; i < lines.length; i += CHUNK) {
+    const chunk = lines.slice(i, i + CHUNK);
+    const text = (i === 0 ? header + '\n\n' : '') + `<blockquote>${chunk.join('\n')}</blockquote>`;
+    await ctx.reply(text, { parse_mode: 'HTML' });
+  }
+}
 
 bot.action(/^board:([a-c])$/, async (ctx) => {
   const tierCode = ctx.match[1];
   await ctx.answerCbQuery();
   await typing(ctx);
-  const round = store.getCurrentRound(tierCode);
-  const rows = store
-    .getTierNumbers(tierCode, round)
-    .filter((r) => r.status === 'pending' || r.status === 'confirmed')
-    .sort((a, b) => a.number - b.number);
-
-  let text;
-  if (rows.length === 0) {
-    text = `📋 <b>${TIERS[tierCode].label} ደረጃ — ዝርዝር</b>\n\nእስካሁን የተያዘ ቁጥር የለም — ሁሉም ${ICON.open} ክፍት ናቸው።`;
-  } else {
-    const lines = rows.map((r) => {
-      const masked = r.phone ? maskPhone(r.phone) : '—';
-      const icon = r.status === 'confirmed' ? ICON.confirmed : ICON.pending;
-      return `${icon} ${String(r.number).padStart(3, '0')}   📱 ${masked}`;
-    });
-    text = `📋 <b>${TIERS[tierCode].label} ደረጃ — ዝርዝር</b>\n\n<blockquote>${lines.join('\n')}</blockquote>\n\nሌላው ሁሉ ${ICON.open} ክፍት ነው።`;
-  }
-
-  await ctx.reply(text, { parse_mode: 'HTML' });
+  await sendBoard(ctx, tierCode);
 });
 
 bot.action(/^pick:([a-c]):(\d+)$/, async (ctx) => {
