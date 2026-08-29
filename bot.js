@@ -306,7 +306,9 @@ bot.start(async (ctx) => {
   } catch (e) {
     await ctx.reply(welcomeText, { parse_mode: 'HTML', ...mainMenuKeyboard() });
   }
- 
+
+  // Make sure the persistent bottom reply-keyboard is shown too.
+  await ctx.reply('ከታች ያለውን ምናሌ ተጠቅመው በማንኛውም ጊዜ መርዳት ይችላሉ፦', replyMenu());
 });
 
 bot.command('numbers', async (ctx) => {
@@ -396,7 +398,7 @@ async function sendBoard(ctx, tierCode) {
     }
   }
 
-  const header = `📋 <b>${TIERS[tierCode].label} ደረጃ — ሙሉ ሰሌዳ</b>`;
+  const header = `📋 <b>${TIERS[tierCode].label} የተያዙ እና ያልተያዙ ቁጥሮች ዝርዝር</b>`;
   const CHUNK = 40;
   for (let i = 0; i < lines.length; i += CHUNK) {
     const chunk = lines.slice(i, i + CHUNK);
