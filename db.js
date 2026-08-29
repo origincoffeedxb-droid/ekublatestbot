@@ -73,6 +73,15 @@ function getActiveLock(userId) {
   return db.prepare('SELECT * FROM active_locks WHERE user_id = ?').get(userId);
 }
 
+// Looks up every reserved number (any tier/round, any status) a given
+// Telegram user has ever placed — used to show "my numbers" without
+// needing to ask for a phone number.
+function getNumbersByUser(userId) {
+  return db.prepare(
+    `SELECT * FROM numbers WHERE user_id = ? ORDER BY tier, round, number`
+  ).all(userId);
+}
+
 // Looks up every reserved number (any tier/round, any status) whose payer
 // phone matches exactly. Phone should already be normalized the same way
 // it was stored (see normalizePhone() in bot.js) before calling this.
@@ -169,6 +178,7 @@ module.exports = {
   getNumberRow,
   getTierNumbers,
   getActiveLock,
+  getNumbersByUser,
   getNumbersByPhone,
   lockNumber,
   releaseNumber,
