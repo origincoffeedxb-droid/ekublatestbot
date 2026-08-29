@@ -73,6 +73,15 @@ function getActiveLock(userId) {
   return db.prepare('SELECT * FROM active_locks WHERE user_id = ?').get(userId);
 }
 
+// Looks up every reserved number (any tier/round, any status) whose payer
+// phone matches exactly. Phone should already be normalized the same way
+// it was stored (see normalizePhone() in bot.js) before calling this.
+function getNumbersByPhone(phone) {
+  return db.prepare(
+    `SELECT * FROM numbers WHERE phone = ? ORDER BY tier, round, number`
+  ).all(phone);
+}
+
 function lockNumber(tier, round, number, userId, username) {
   const now = Date.now();
   const tx = db.transaction(() => {
@@ -160,6 +169,7 @@ module.exports = {
   getNumberRow,
   getTierNumbers,
   getActiveLock,
+  getNumbersByPhone,
   lockNumber,
   releaseNumber,
   setPayerPhone,
