@@ -99,11 +99,6 @@ function maskPhone(phone) {
 // phone number they paid from, before the submission is finalized.
 const pendingPhoneRequests = new Map(); // userId -> { tierCode, round, number, txnId }
 
-// Tracks users who tapped "👁 የመረጡትን ቁጥር ለማየት" and are now expected to send
-// the phone number they paid with, so we can look up every number reserved
-// under that phone (across tiers/rounds), not just their current active lock.
-const pendingLookupRequests = new Set(); // userId
-
 // Best-effort "bot is typing…" cue — purely cosmetic, never blocks the flow.
 function typing(ctx) {
   return ctx.sendChatAction('typing').catch(() => {});
@@ -326,34 +321,24 @@ bot.hears('🎟️ ቁጥር ለመያዝ', async (ctx) => {
 });
 
 async function mynumberReply(ctx) {
-  pendingLookupRequests.add(ctx.from.id);
   await typing(ctx);
+  const rows = store.getNumbersByUser(ctx.from.id);
+  if (!rows.length) {
+    return ctx.reply('❕ አሁን ምንም የያዙት ቁጥር የለዎትም።');
+  }
+  const lines = rows.map((r) => {
+    const tier = TIERS[r.tier] || { label: r.tier };
+    const status = STATUS_LABEL[r.status] || r.status;
+    const phoneLine = r.phone ? ` — 📱 ${maskPhone(r.phone)}` : '';
+    return `ቁጥር <b>${boldNumber(r.number)}</b> — ${tier.label} (ዙር ${r.round}) — ${status}${phoneLine}`;
+  });
   await ctx.reply(
-    `👁 <b>የመረጡትን ቁጥር ለማየት</b>\n\n` +
-      `📱 እባክዎ የከፈሉበትን ስልክ ቁጥር ይላኩልን (ለምሳሌ: <code>0912345678</code>)፣ በዚያ ስልክ ቁጥር የተያዙትን ቁጥሮች ላሳይዎት።`,
+    `👁 <b>የመረጡት ቁጥር(ሮች)</b>\n\n<blockquote>${lines.join('\n')}</blockquote>`,
     { parse_mode: 'HTML' }
   );
 }
 bot.command('mynumber', mynumberReply);
 bot.hears('👁 የመረጡትን ቁጥር ለማየት', mynumberReply);
-
-// Formats and sends every reservation found under a given (already
-// normalized) phone number.
-async function sendNumbersForPhone(ctx, phone) {
-  const rows = store.getNumbersByPhone(phone);
-  if (!rows.length) {
-    return ctx.reply(`❕ በስልክ ቁጥር <code>${maskPhone(phone)}</code> የተያዘ ቁጥር አልተገኘም።`, { parse_mode: 'HTML' });
-  }
-  const lines = rows.map((r) => {
-    const tier = TIERS[r.tier] || { label: r.tier };
-    const status = STATUS_LABEL[r.status] || r.status;
-    return `ቁጥር <b>${boldNumber(r.number)}</b> — ${tier.label} (ዙር ${r.round}) — ${status}`;
-  });
-  await ctx.reply(
-    `👁 <b>በስልክ ቁጥር <code>${maskPhone(phone)}</code> የተያዙ ቁጥሮች</b>\n\n<blockquote>${lines.join('\n')}</blockquote>`,
-    { parse_mode: 'HTML' }
-  );
-}
 
 bot.hears('❓ ጥያቄ ወይም እገዛ ለማግኘት', (ctx) => ctx.reply('🛟 እርዳታ ካስፈለገዎት ያነጋግሩን፦ @eletawiequbsupport'));
 
@@ -501,23 +486,6 @@ bot.action(/^pick:a:(\d+)$/, async (ctx) => {
 // shown next to the number on the board / pushed to the channel.
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
-
-  // "👁 የመረጡትን ቁጥር ለማየት" flow: user was asked for a phone number to look up.
-  if (pendingLookupRequests.has(userId)) {
-    const phoneText = ctx.message.text.trim();
-    if (!isValidPhone(phoneText)) {
-      return ctx.reply(
-        `❌ <b>ይህ ትክክለኛ ስልክ ቁጥር አደለም።</b>\n\n` +
-        `እባክዎ የከፈሉበትን ስልክ ቁጥር በትክክል ያስገቡ:\n<code>0912345678</code>`,
-        { parse_mode: 'HTML' }
-      );
-    }
-    pendingLookupRequests.delete(userId);
-    const phone = normalizePhone(phoneText);
-    await typing(ctx);
-    await sendNumbersForPhone(ctx, phone);
-    return;
-  }
 
   // Step 2: we already have a txn ID for this user and are waiting on the phone number
   const awaitingPhone = pendingPhoneRequests.get(userId);
