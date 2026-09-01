@@ -667,18 +667,37 @@ bot.action(/^rej:a:(\d+)$/, async (ctx) => {
 
 // ---------- Full-board notification (fires once, the moment a round fills up) ----------
 
+// Tracks the "big wheel, ready to spin" message posted to the announcement
+// channel when a round fills up, so the live spin can animate that SAME
+// message in place rather than posting a separate one. tierCode -> {chatId, messageId}
+const pendingWheelMessages = new Map();
+
+// A big, static "wheel" made of every number in the round — shown the moment
+// a round fills up, sitting there loaded and waiting for admin approval.
+function wheelIdleFrame(numbers) {
+  return numbers.map((n) => `🎡<b>${boldNumber(n)}</b>`).join('   ');
+}
+
 async function announceBoardFull(tierCode, round) {
   store.setTierStatus(tierCode, 'full');
   const tier = TIERS[tierCode];
+  const numbers = [];
+  for (let n = 1; n <= TOTAL_NUMBERS; n++) numbers.push(n);
 
-  const text =
+  const dmText =
     `🎉 <b>ደረጃው ሙሉ በሙሉ ተይዟል!</b> — ${tier.label} ደረጃ (ዙር ${round})\n\n` +
     `ሁሉም ${TOTAL_NUMBERS} ቁጥሮች ተከፍለው ተረጋግጠዋል። 🎊\n` +
     `🎡 አሸናፊው የሚመረጠው አስተዳዳሪዎቻችን በሚያሳውቁት ልዩ ሰዓት ላይ፣ ቀጥታ በሚደረግ የዕጣ ማዞሪያ ነው። እባክዎ ትንሽ ይጠብቁን — ሰዓቱ በቅርቡ ይገለጻል! 🍀`;
 
+  const channelText =
+    dmText + `\n\n` +
+    wheelIdleFrame(numbers) + `\n\n` +
+    `⏳ <i>የአስተዳዳሪዎቻችንን ማጽደቅ በመጠባበቅ ላይ — ሲፈቀድ ወዲያውኑ ቀጥታ ይሽከረከራል!</i>`;
+
   if (ANNOUNCE_CHAT_ID) {
     try {
-      await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, text, { parse_mode: 'HTML' });
+      const sent = await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, channelText, { parse_mode: 'HTML' });
+      pendingWheelMessages.set(tierCode, { chatId: ANNOUNCE_CHAT_ID, messageId: sent.message_id });
     } catch (e) {
       console.error('Could not announce full board to ANNOUNCE_CHAT_ID:', e.message);
     }
@@ -688,17 +707,22 @@ async function announceBoardFull(tierCode, round) {
   const rows = store.getTierNumbers(tierCode, round).filter((r) => r.status === 'confirmed' && r.user_id);
   for (const r of rows) {
     try {
-      await bot.telegram.sendMessage(r.user_id, text, { parse_mode: 'HTML' });
+      await bot.telegram.sendMessage(r.user_id, dmText, { parse_mode: 'HTML' });
     } catch (e) { /* user may have blocked the bot — ignore */ }
   }
 
+  // Ask the admins to approve the draw with a button — no command to type.
   try {
     await bot.telegram.sendMessage(
       ADMIN_CHAT_ID,
       `📣 <b>${tier.label} ደረጃ ሙሉ ሆኗል (ዙር ${round})።</b>\n\n` +
-        `የዕጣ ሰዓት ለማሳወቅ፦ <code>/settime &lt;ሰዓት&gt;</code>\n` +
-        `ቀጥታ ማዞሪያውን ለመጀመር፦ <code>/spin</code>`,
-      { parse_mode: 'HTML' }
+        `ማዞሪያውን ለማጽደቅ ከታች ይንኩ፦ (ወይም ሰዓት ለማሳወቅ <code>/settime &lt;ሰዓት&gt;</code> ይላኩ)`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          Markup.button.callback('✅ አጽድቅ እና አዙር', `spinok:${tierCode}`),
+        ]),
+      }
     );
   } catch (e) {
     console.error('Failed to notify admin chat that the board is full:', e.message);
@@ -793,6 +817,31 @@ bot.command('spin', async (ctx) => {
   await startLiveSpin(tierCode, round);
 });
 
+// Admin-only: the "✅ አጽድቅ እና አዙር" button posted alongside the full-board
+// notice. This is the normal way to start a draw — approve with one tap and
+// the bot spins automatically, no command to type.
+bot.action(/^spinok:a$/, async (ctx) => {
+  if (!isAdminChat(ctx)) return ctx.answerCbQuery('Admins only.', { show_alert: true });
+  const tierCode = 'a';
+  const round = store.getCurrentRound(tierCode);
+  const status = store.getTierStatus(tierCode);
+  const confirmed = store.countConfirmed(tierCode, round);
+
+  if (confirmed < TOTAL_NUMBERS) {
+    return ctx.answerCbQuery('ገና ሁሉም ቁጥሮች አልተያዙም።', { show_alert: true });
+  }
+  if (status === 'drawing') {
+    return ctx.answerCbQuery('ማዞሪያው አስቀድሞ በመካሄድ ላይ ነው።', { show_alert: true });
+  }
+
+  store.setTierStatus(tierCode, 'drawing');
+  await ctx.answerCbQuery('🎡 ማዞሪያው ጸድቋል — በመሽከርከር ላይ!');
+  try {
+    await ctx.editMessageText(ctx.callbackQuery.message.text + '\n\n✅ ማዞሪያው ጸድቋል — በማስታወቂያ ቻናሉ ላይ በቀጥታ እየተሽከረከረ ነው!');
+  } catch (e) { /* ignore */ }
+  await startLiveSpin(tierCode, round);
+});
+
 async function startLiveSpin(tierCode, round) {
   const tier = TIERS[tierCode];
   const winnerRow = store.pickWinnerRow(tierCode, round);
@@ -812,17 +861,42 @@ async function startLiveSpin(tierCode, round) {
   const sequence = buildSpinSequence(numbers, winnerRow.number);
   const header = `🎡 <b>${tier.label} ደረጃ — ቀጥታ የዕጣ ማዞሪያ (ዙር ${round})</b>\n\n`;
 
-  let sentAnnounce;
-  try {
-    sentAnnounce = await bot.telegram.sendMessage(
-      ANNOUNCE_CHAT_ID,
-      header + wheelFrame(numbers, sequence[0]),
-      { parse_mode: 'HTML' }
-    );
-  } catch (e) {
-    console.error('Could not start live spin on ANNOUNCE_CHAT_ID:', e.message);
-    store.setTierStatus(tierCode, 'open');
-    return;
+  // Prefer animating the same "ready wheel" message posted to the channel
+  // when the board filled up, so it visibly comes alive in place. Falls
+  // back to a fresh message if that one is gone (e.g. bot restarted).
+  const pending = pendingWheelMessages.get(tierCode);
+  pendingWheelMessages.delete(tierCode);
+
+  let spinChatId = ANNOUNCE_CHAT_ID;
+  let spinMessageId = null;
+
+  if (pending) {
+    try {
+      await bot.telegram.editMessageText(
+        pending.chatId,
+        pending.messageId,
+        undefined,
+        header + wheelFrame(numbers, sequence[0]),
+        { parse_mode: 'HTML' }
+      );
+      spinChatId = pending.chatId;
+      spinMessageId = pending.messageId;
+    } catch (e) { /* message may be gone — fall through and send a fresh one */ }
+  }
+
+  if (!spinMessageId) {
+    try {
+      const sent = await bot.telegram.sendMessage(
+        ANNOUNCE_CHAT_ID,
+        header + wheelFrame(numbers, sequence[0]),
+        { parse_mode: 'HTML' }
+      );
+      spinMessageId = sent.message_id;
+    } catch (e) {
+      console.error('Could not start live spin on ANNOUNCE_CHAT_ID:', e.message);
+      store.setTierStatus(tierCode, 'open');
+      return;
+    }
   }
 
   // Animate: fast at first, slowing down toward the end so it feels like a
@@ -833,8 +907,8 @@ async function startLiveSpin(tierCode, round) {
     await sleep(delay);
     try {
       await bot.telegram.editMessageText(
-        ANNOUNCE_CHAT_ID,
-        sentAnnounce.message_id,
+        spinChatId,
+        spinMessageId,
         undefined,
         header + wheelFrame(numbers, sequence[i]),
         { parse_mode: 'HTML' }
@@ -853,7 +927,7 @@ async function startLiveSpin(tierCode, round) {
 
   await sleep(600);
   try {
-    await bot.telegram.editMessageText(ANNOUNCE_CHAT_ID, sentAnnounce.message_id, undefined, finalText, { parse_mode: 'HTML' });
+    await bot.telegram.editMessageText(spinChatId, spinMessageId, undefined, finalText, { parse_mode: 'HTML' });
   } catch (e) {
     console.error('Could not post final draw result to ANNOUNCE_CHAT_ID:', e.message);
   }
