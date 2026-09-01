@@ -80,6 +80,22 @@ if (!tierStateCols.includes('draw_time')) {
   db.exec('ALTER TABLE tier_state ADD COLUMN draw_time TEXT');
 }
 
+// Migration: fields that coordinate the Mini App live spin/countdown.
+// spin_status: idle | counting | spinning | done
+// spin_target_time: epoch ms the countdown is aiming for (null when idle/instant)
+// winner_number: set once the draw resolves, read by the Mini App to animate
+//                the wheel landing on the right slice for every viewer.
+const tierStateCols2 = db.prepare("PRAGMA table_info(tier_state)").all().map((col) => col.name);
+if (!tierStateCols2.includes('spin_status')) {
+  db.exec("ALTER TABLE tier_state ADD COLUMN spin_status TEXT NOT NULL DEFAULT 'idle'");
+}
+if (!tierStateCols2.includes('spin_target_time')) {
+  db.exec('ALTER TABLE tier_state ADD COLUMN spin_target_time INTEGER');
+}
+if (!tierStateCols2.includes('winner_number')) {
+  db.exec('ALTER TABLE tier_state ADD COLUMN winner_number INTEGER');
+}
+
 function getCurrentRound(tier) {
   const row = db.prepare('SELECT current_round FROM tier_state WHERE tier = ?').get(tier);
   if (row) return row.current_round;
@@ -108,6 +124,41 @@ function setDrawTime(tier, drawTime) {
 function getDrawTime(tier) {
   const row = db.prepare('SELECT draw_time FROM tier_state WHERE tier = ?').get(tier);
   return row ? row.draw_time : null;
+}
+
+// ---------- Mini App live-spin coordination ----------
+// All viewers of the Mini App poll getSpinState() so they see the SAME
+// countdown target and the SAME winner — the draw itself is decided once,
+// server-side, in bot.js; the Mini App is a read-only view onto this state.
+
+function setSpinSchedule(tier, targetTime, status = 'counting') {
+  getCurrentRound(tier);
+  db.prepare(
+    'UPDATE tier_state SET spin_status = ?, spin_target_time = ?, winner_number = NULL WHERE tier = ?'
+  ).run(status, targetTime, tier);
+}
+
+function setSpinStatus(tier, status) {
+  getCurrentRound(tier);
+  db.prepare('UPDATE tier_state SET spin_status = ? WHERE tier = ?').run(status, tier);
+}
+
+function setSpinWinner(tier, number) {
+  db.prepare('UPDATE tier_state SET winner_number = ? WHERE tier = ?').run(number, tier);
+}
+
+function getSpinState(tier) {
+  getCurrentRound(tier);
+  const row = db.prepare(
+    'SELECT spin_status, spin_target_time, winner_number, current_round FROM tier_state WHERE tier = ?'
+  ).get(tier);
+  return row;
+}
+
+function resetSpin(tier) {
+  db.prepare(
+    "UPDATE tier_state SET spin_status = 'idle', spin_target_time = NULL, winner_number = NULL WHERE tier = ?"
+  ).run(tier);
 }
 
 function getNumberRow(tier, round, number) {
@@ -235,6 +286,11 @@ module.exports = {
   setTierStatus,
   setDrawTime,
   getDrawTime,
+  setSpinSchedule,
+  setSpinStatus,
+  setSpinWinner,
+  getSpinState,
+  resetSpin,
   getNumbersByUser,
   getNumbersByPhone,
   lockNumber,
