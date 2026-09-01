@@ -629,8 +629,8 @@ bot.action(/^appr:a:(\d+)$/, async (ctx) => {
   await postFullBoardToChannel(tierCode, round);
 
   const confirmed = store.countConfirmed(tierCode, round);
-  if (confirmed >= TOTAL_NUMBERS) {
-    await runDraw(tierCode, round);
+  if (confirmed >= TOTAL_NUMBERS && store.getTierStatus(tierCode) === 'open') {
+    await announceBoardFull(tierCode, round);
   }
 });
 
@@ -665,52 +665,215 @@ bot.action(/^rej:a:(\d+)$/, async (ctx) => {
   }
 });
 
-async function runDraw(tierCode, round) {
-  const winnerRow = store.pickWinnerRow(tierCode, round);
-  if (!winnerRow) return;
-  store.recordWinner(tierCode, round, winnerRow.number, winnerRow.user_id, winnerRow.username);
+// ---------- Full-board notification (fires once, the moment a round fills up) ----------
+
+async function announceBoardFull(tierCode, round) {
+  store.setTierStatus(tierCode, 'full');
+  const tier = TIERS[tierCode];
+
+  const text =
+    `🎉 <b>ደረጃው ሙሉ በሙሉ ተይዟል!</b> — ${tier.label} ደረጃ (ዙር ${round})\n\n` +
+    `ሁሉም ${TOTAL_NUMBERS} ቁጥሮች ተከፍለው ተረጋግጠዋል። 🎊\n` +
+    `🎡 አሸናፊው የሚመረጠው አስተዳዳሪዎቻችን በሚያሳውቁት ልዩ ሰዓት ላይ፣ ቀጥታ በሚደረግ የዕጣ ማዞሪያ ነው። እባክዎ ትንሽ ይጠብቁን — ሰዓቱ በቅርቡ ይገለጻል! 🍀`;
+
+  if (ANNOUNCE_CHAT_ID) {
+    try {
+      await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, text, { parse_mode: 'HTML' });
+    } catch (e) {
+      console.error('Could not announce full board to ANNOUNCE_CHAT_ID:', e.message);
+    }
+  }
+
+  // Privately notify every confirmed participant in this round.
+  const rows = store.getTierNumbers(tierCode, round).filter((r) => r.status === 'confirmed' && r.user_id);
+  for (const r of rows) {
+    try {
+      await bot.telegram.sendMessage(r.user_id, text, { parse_mode: 'HTML' });
+    } catch (e) { /* user may have blocked the bot — ignore */ }
+  }
+
+  try {
+    await bot.telegram.sendMessage(
+      ADMIN_CHAT_ID,
+      `📣 <b>${tier.label} ደረጃ ሙሉ ሆኗል (ዙር ${round})።</b>\n\n` +
+        `የዕጣ ሰዓት ለማሳወቅ፦ <code>/settime &lt;ሰዓት&gt;</code>\n` +
+        `ቀጥታ ማዞሪያውን ለመጀመር፦ <code>/spin</code>`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (e) {
+    console.error('Failed to notify admin chat that the board is full:', e.message);
+  }
+}
+
+// Admin-only: announce the specific draw time to the channel and to every
+// confirmed participant in the current (full) round. Free-text time — the
+// admin decides the format ("ዛሬ ምሽት 9:00", a full date, etc).
+bot.command('settime', async (ctx) => {
+  if (!isAdminChat(ctx)) return;
+  const tierCode = 'a';
+  const round = store.getCurrentRound(tierCode);
+  const status = store.getTierStatus(tierCode);
+  if (status !== 'full' && status !== 'scheduled') {
+    return ctx.reply('ደረጃው ገና ሙሉ አልሆነም — ሁሉም ቁጥሮች ተከፍለው እስኪረጋገጡ ድረስ ሰዓት ማዘጋጀት አያስፈልግም።');
+  }
+
+  const drawTime = ctx.message.text.replace(/^\/settime(@\w+)?\s*/, '').trim();
+  if (!drawTime) {
+    return ctx.reply('አጠቃቀም፦ /settime <ቀን እና ሰዓት>  (ለምሳሌ: /settime ዛሬ ምሽት 9:00)');
+  }
+
+  store.setDrawTime(tierCode, drawTime);
+  store.setTierStatus(tierCode, 'scheduled');
 
   const tier = TIERS[tierCode];
-  const suspenseFrames = [
-    `🎰 <b>ደረጃው ተሞልቷል! ዕጣ በመሽከርከር ላይ</b> ⚙️`,
-    `🎰 <b>ደረጃው ተሞልቷል! ዕጣ በመሽከርከር ላይ</b> ⚙️.`,
-    `🎰 <b>ደረጃው ተሞልቷል! ዕጣ በመሽከርከር ላይ</b> ⚙️..`,
-    `🎰 <b>ደረጃው ተሞልቷል! ዕጣ በመሽከርከር ላይ</b> ⚙️...`,
-  ];
+  const text =
+    `⏰ <b>የዕጣ ሰዓት ተገልጿል!</b> — ${tier.label} ደረጃ (ዙር ${round})\n\n` +
+    `🎡 አሸናፊው በ<b>${drawTime}</b> ላይ ቀጥታ በሚደረግ የዕጣ ማዞሪያ ይመረጣል። እባክዎ በሰዓቱ ከቻናላችን ጋር ይቆዩ! 🍀`;
+
+  if (ANNOUNCE_CHAT_ID) {
+    try {
+      await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, text, { parse_mode: 'HTML' });
+    } catch (e) {
+      console.error('Could not announce draw time to ANNOUNCE_CHAT_ID:', e.message);
+    }
+  }
+
+  const rows = store.getTierNumbers(tierCode, round).filter((r) => r.status === 'confirmed' && r.user_id);
+  for (const r of rows) {
+    try {
+      await bot.telegram.sendMessage(r.user_id, text, { parse_mode: 'HTML' });
+    } catch (e) { /* ignore */ }
+  }
+
+  ctx.reply(`✅ ሰዓቱ ተመዝግቧል እና ተገልጿል፦ ${drawTime}`);
+});
+
+// ---------- Live spin wheel — admin-triggered ----------
+
+// Builds one animation frame: every number in the round laid out in a row,
+// with the currently-highlighted one boxed by a pointer — a text-only wheel.
+function wheelFrame(numbers, highlight) {
+  return numbers
+    .map((n) => (n === highlight ? `👉<b>${boldNumber(n)}</b>👈` : `${ICON.taken}${n}`))
+    .join('   ');
+}
+
+// Builds the sequence of numbers the pointer lands on across the animation:
+// a few fast laps around the wheel, then a final approach that always ends
+// on the real (already-picked) winner, so the animation never "cheats".
+function buildSpinSequence(numbers, winnerNumber) {
+  const sequence = [];
+  const laps = 3;
+  for (let lap = 0; lap < laps; lap++) {
+    for (const n of numbers) sequence.push(n);
+  }
+  const winnerIdx = numbers.indexOf(winnerNumber);
+  for (let i = 0; i <= winnerIdx; i++) sequence.push(numbers[i]);
+  if (sequence[sequence.length - 1] !== winnerNumber) sequence.push(winnerNumber);
+  return sequence;
+}
+
+// Admin-only manual command to kick off the live, animated draw once a round is full.
+bot.command('spin', async (ctx) => {
+  if (!isAdminChat(ctx)) return;
+  const tierCode = 'a';
+  const round = store.getCurrentRound(tierCode);
+  const status = store.getTierStatus(tierCode);
+  const confirmed = store.countConfirmed(tierCode, round);
+
+  if (confirmed < TOTAL_NUMBERS) {
+    return ctx.reply('ገና ሁሉም ቁጥሮች አልተያዙም — ማዞሪያውን ማስጀመር አይቻልም።');
+  }
+  if (status === 'drawing') {
+    return ctx.reply('ማዞሪያው አስቀድሞ በመካሄድ ላይ ነው።');
+  }
+
+  store.setTierStatus(tierCode, 'drawing');
+  await ctx.reply('🎡 ማዞሪያው ተጀምሯል — ወደ ማስታወቂያ ቻናሉ ይሂዱ!');
+  await startLiveSpin(tierCode, round);
+});
+
+async function startLiveSpin(tierCode, round) {
+  const tier = TIERS[tierCode];
+  const winnerRow = store.pickWinnerRow(tierCode, round);
+  if (!winnerRow) {
+    store.setTierStatus(tierCode, 'open');
+    return;
+  }
+
+  if (!ANNOUNCE_CHAT_ID) {
+    console.error('ANNOUNCE_CHAT_ID not set — cannot run the live spin.');
+    store.setTierStatus(tierCode, 'open');
+    return;
+  }
+
+  const numbers = [];
+  for (let n = 1; n <= TOTAL_NUMBERS; n++) numbers.push(n);
+  const sequence = buildSpinSequence(numbers, winnerRow.number);
+  const header = `🎡 <b>${tier.label} ደረጃ — ቀጥታ የዕጣ ማዞሪያ (ዙር ${round})</b>\n\n`;
+
+  let sentAnnounce;
+  try {
+    sentAnnounce = await bot.telegram.sendMessage(
+      ANNOUNCE_CHAT_ID,
+      header + wheelFrame(numbers, sequence[0]),
+      { parse_mode: 'HTML' }
+    );
+  } catch (e) {
+    console.error('Could not start live spin on ANNOUNCE_CHAT_ID:', e.message);
+    store.setTierStatus(tierCode, 'open');
+    return;
+  }
+
+  // Animate: fast at first, slowing down toward the end so it feels like a
+  // real spinning wheel coasting to a stop on the winner.
+  for (let i = 1; i < sequence.length; i++) {
+    const fromEnd = sequence.length - i;
+    const delay = fromEnd > 6 ? 120 : 120 + (7 - fromEnd) * 180;
+    await sleep(delay);
+    try {
+      await bot.telegram.editMessageText(
+        ANNOUNCE_CHAT_ID,
+        sentAnnounce.message_id,
+        undefined,
+        header + wheelFrame(numbers, sequence[i]),
+        { parse_mode: 'HTML' }
+      );
+    } catch (e) { /* transient edit races — ignore, animation continues */ }
+  }
+
+  store.recordWinner(tierCode, round, winnerRow.number, winnerRow.user_id, winnerRow.username);
+
   const finalText =
     `🎊 <b>የዕጣ ውጤት — ${tier.label} ደረጃ (ዙር ${round})</b> 🎊\n\n` +
     `🏆 አሸናፊ ቁጥር፦ ${boldNumber(winnerRow.number)}\n` +
-    `👤 አሸናፊ፦ ${winnerRow.username || 'ተጠቃሚ ' + winnerRow.user_id}\n\n` +
+    `👤 አሸናፊ፦ ${winnerRow.username || 'ተጠቃሚ ' + winnerRow.user_id}\n` +
+    `📱 ስልክ፦ <code>${winnerRow.phone || '—'}</code>\n\n` +
     `✨ እንኳን ደስ አለዎት! አዲስ ዙር አሁን ይጀምራል — ለመቀላቀል ቁጥር ይምረጡ።`;
 
+  await sleep(600);
   try {
-    const sentAdmin = await bot.telegram.sendMessage(ADMIN_CHAT_ID, suspenseFrames[0], { parse_mode: 'HTML' });
-    await playFrames(bot.telegram, ADMIN_CHAT_ID, sentAdmin.message_id, suspenseFrames.slice(1), { parse_mode: 'HTML' }, 500);
-    await sleep(500);
-    await bot.telegram.editMessageText(ADMIN_CHAT_ID, sentAdmin.message_id, undefined, finalText, { parse_mode: 'HTML' });
+    await bot.telegram.editMessageText(ANNOUNCE_CHAT_ID, sentAnnounce.message_id, undefined, finalText, { parse_mode: 'HTML' });
+  } catch (e) {
+    console.error('Could not post final draw result to ANNOUNCE_CHAT_ID:', e.message);
+  }
+
+  try {
+    await bot.telegram.sendMessage(ADMIN_CHAT_ID, finalText, { parse_mode: 'HTML' });
   } catch (e) {
     console.error('Could not post draw result to ADMIN_CHAT_ID:', e.message);
   }
 
-  if (ANNOUNCE_CHAT_ID) {
-    try {
-      const sentAnnounce = await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, suspenseFrames[0], { parse_mode: 'HTML' });
-      await playFrames(bot.telegram, ANNOUNCE_CHAT_ID, sentAnnounce.message_id, suspenseFrames.slice(1), { parse_mode: 'HTML' }, 500);
-      await sleep(500);
-      await bot.telegram.editMessageText(ANNOUNCE_CHAT_ID, sentAnnounce.message_id, undefined, finalText, { parse_mode: 'HTML' });
-    } catch (e) {
-      console.error('Could not post to ANNOUNCE_CHAT_ID:', e.message);
-    }
-  }
-
+  // Private message to the winner — confirms to them, specifically, that they won.
   if (winnerRow.user_id) {
     try {
       await bot.telegram.sendMessage(
         winnerRow.user_id,
-        `🏆 <b>እንኳን ደስ አለዎት!</b>\n\nበቁጥር ${boldNumber(winnerRow.number)} የ${tier.label} ዕጣውን አሸንፈዋል! አስተዳዳሪያችን በቅርቡ ያገኝዎታል። 🍾`,
+        `🏆 <b>እንኳን ደስ አለዎት! እርስዎ አሸናፊ ነዎት! 🎉</b>\n\n` +
+          `በቁጥር ${boldNumber(winnerRow.number)} የ${tier.label} ዕጣውን አሸንፈዋል! አስተዳዳሪያችን በቅርቡ ያገኝዎታል። 🍾`,
         { parse_mode: 'HTML' }
       );
-    } catch (e) {}
+    } catch (e) { /* ignore — e.g. user blocked the bot */ }
   }
 
   store.startNewRound(tierCode);
