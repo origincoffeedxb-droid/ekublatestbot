@@ -12,6 +12,7 @@
 // ============================================================
 
 const { createCanvas } = require('@napi-rs/canvas');
+
 const { GIFEncoder, quantize, applyPalette } = require('gifenc');
 
 const SIZE = 640;
