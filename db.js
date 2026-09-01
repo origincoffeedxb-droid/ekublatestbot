@@ -68,11 +68,46 @@ if (activeLocksCols.length && !activeLocksCols.includes('number')) {
   `);
 }
 
+// Migration: databases created before the scheduled-draw feature won't have
+// these columns yet — add them if missing (same pattern as the phone-column
+// migration above). `status` tracks where a round is in the full -> scheduled
+// -> drawing -> open lifecycle; `draw_time` holds the admin-announced time.
+const tierStateCols = db.prepare("PRAGMA table_info(tier_state)").all().map((col) => col.name);
+if (!tierStateCols.includes('status')) {
+  db.exec("ALTER TABLE tier_state ADD COLUMN status TEXT NOT NULL DEFAULT 'open'");
+}
+if (!tierStateCols.includes('draw_time')) {
+  db.exec('ALTER TABLE tier_state ADD COLUMN draw_time TEXT');
+}
+
 function getCurrentRound(tier) {
   const row = db.prepare('SELECT current_round FROM tier_state WHERE tier = ?').get(tier);
   if (row) return row.current_round;
   db.prepare('INSERT INTO tier_state (tier, current_round) VALUES (?, 1)').run(tier);
   return 1;
+}
+
+// ---------- Round lifecycle: open -> full -> scheduled -> drawing -> open ----------
+
+function getTierStatus(tier) {
+  getCurrentRound(tier); // ensures a tier_state row exists
+  const row = db.prepare('SELECT status FROM tier_state WHERE tier = ?').get(tier);
+  return row ? row.status : 'open';
+}
+
+function setTierStatus(tier, status) {
+  getCurrentRound(tier);
+  db.prepare('UPDATE tier_state SET status = ? WHERE tier = ?').run(status, tier);
+}
+
+function setDrawTime(tier, drawTime) {
+  getCurrentRound(tier);
+  db.prepare('UPDATE tier_state SET draw_time = ? WHERE tier = ?').run(drawTime, tier);
+}
+
+function getDrawTime(tier) {
+  const row = db.prepare('SELECT draw_time FROM tier_state WHERE tier = ?').get(tier);
+  return row ? row.draw_time : null;
 }
 
 function getNumberRow(tier, round, number) {
@@ -178,8 +213,8 @@ function startNewRound(tier) {
   const row = db.prepare('SELECT current_round FROM tier_state WHERE tier = ?').get(tier);
   const next = (row ? row.current_round : 1) + 1;
   db.prepare(
-    `INSERT INTO tier_state (tier, current_round) VALUES (?, ?)
-     ON CONFLICT(tier) DO UPDATE SET current_round = excluded.current_round`
+    `INSERT INTO tier_state (tier, current_round, status, draw_time) VALUES (?, ?, 'open', NULL)
+     ON CONFLICT(tier) DO UPDATE SET current_round = excluded.current_round, status = 'open', draw_time = NULL`
   ).run(tier, next);
   return next;
 }
@@ -196,6 +231,10 @@ module.exports = {
   getNumberRow,
   getTierNumbers,
   getActiveLock,
+  getTierStatus,
+  setTierStatus,
+  setDrawTime,
+  getDrawTime,
   getNumbersByUser,
   getNumbersByPhone,
   lockNumber,
