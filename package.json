@@ -1,18 +1,19 @@
 {
   "name": "ethio-number-bot",
   "version": "1.0.0",
-  "description": "Telegram number-selection deposit bot (200/500/1000 ETB tiers) with admin approval and auto-draw",
-  "main": "bot.js",
+  "description": "Telegram number-selection deposit bot (200 ETB tier) with admin approval and a Mini App live countdown/spin draw",
+  "main": "start.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node start.js",
+    "start:bot": "node bot.js",
+    "start:webapp": "node webapp/server.js"
   },
   "dependencies": {
     "telegraf": "^4.16.3",
     "better-sqlite3": "^11.3.0",
     "dotenv": "^16.4.5",
-    "@napi-rs/canvas": "^0.1.53",
-    "gifenc": "^1.0.3"
+    "express": "^4.19.2"
   },
   "engines": {
     "node": ">=18"
