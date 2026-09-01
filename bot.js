@@ -1,7 +1,6 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const store = require('./db');
-const { renderIdleWheelPng, renderSpinGif } = require('./wheel-render');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
@@ -9,6 +8,12 @@ const ANNOUNCE_CHAT_ID = process.env.ANNOUNCE_CHAT_ID;
 const TELEBIRR_NUMBER = process.env.TELEBIRR_NUMBER || 'SET_YOUR_TELEBIRR_NUMBER';
 const TELEBIRR_NAME = process.env.TELEBIRR_NAME || 'Your Company';
 const LOCK_MINUTES = parseInt(process.env.LOCK_MINUTES || '5', 10);
+
+// Mini App deep link config — see webapp/ and DEPLOY.md.
+// MINIAPP_SHORT_NAME must match exactly what you set in @BotFather (/newapp).
+// BOT_USERNAME is optional — if unset, the bot fetches it from getMe() at startup.
+const MINIAPP_SHORT_NAME = process.env.MINIAPP_SHORT_NAME || 'draw';
+let BOT_USERNAME = process.env.BOT_USERNAME || null;
 
 if (!BOT_TOKEN) {
   console.error('Missing BOT_TOKEN in .env — get one from @BotFather on Telegram.');
@@ -28,6 +33,12 @@ const TIERS = {
 const TOTAL_NUMBERS = 5; // size of the number pool per round — one draw once all of these are confirmed
 const PAGE_SIZE = 50; // numbers per page (5 rows x 10) — irrelevant while TOTAL_NUMBERS <= 50, kept for future growth
 
+// How long the "spinning" phase visually runs in the Mini App before a
+// winner is revealed. Keep this in sync with SPIN_ANIMATION_MS in
+// webapp/public/app.js so the server resolves the draw right as the wheel
+// animation finishes for viewers.
+const SPIN_ANIMATION_MS = 6000;
+
 function displayName(from) {
   return from.username ? '@' + from.username : (from.first_name || 'ተጠቃሚ');
 }
@@ -37,7 +48,9 @@ function displayName(from) {
 //  (Telegram has no real color/CSS control, so "next-gen" here
 //  means: a consistent emoji palette, HTML "cards" via
 //  <blockquote>/<code>, a heat-gradient progress bar, and real
-//  animation via short sequences of message edits.)
+//  animation via short sequences of message edits — plus, for the
+//  final live draw, a Telegram Mini App that runs its own canvas
+//  wheel animation; see webapp/.)
 // ============================================================
 
 const ICON = {
@@ -668,36 +681,26 @@ bot.action(/^rej:a:(\d+)$/, async (ctx) => {
 
 // ---------- Full-board notification (fires once, the moment a round fills up) ----------
 
-// Tracks the "big wheel, ready to spin" message posted to the announcement
-// channel when a round fills up, so the live spin can animate that SAME
-// message in place rather than posting a separate one. tierCode -> {chatId, messageId}
-const pendingWheelMessages = new Map();
+// Builds the direct-link URL that opens the Mini App (webapp/) — works from
+// private chats, groups, AND channels (unlike an inline `web_app` button,
+// which Telegram restricts to private chats between a user and the bot).
+function spinAppUrl(tierCode, round) {
+  const username = BOT_USERNAME ? BOT_USERNAME.replace(/^@/, '') : 'your_bot';
+  return `https://t.me/${username}/${MINIAPP_SHORT_NAME}?startapp=${tierCode}_${round}`;
+}
 
 async function announceBoardFull(tierCode, round) {
   store.setTierStatus(tierCode, 'full');
   const tier = TIERS[tierCode];
-  const numbers = [];
-  for (let n = 1; n <= TOTAL_NUMBERS; n++) numbers.push(n);
 
   const dmText =
     `🎉 <b>ደረጃው ሙሉ በሙሉ ተይዟል!</b> — ${tier.label} ደረጃ (ዙር ${round})\n\n` +
     `ሁሉም ${TOTAL_NUMBERS} ቁጥሮች ተከፍለው ተረጋግጠዋል። 🎊\n` +
     `🎡 አሸናፊው የሚመረጠው አስተዳዳሪዎቻችን በሚያሳውቁት ልዩ ሰዓት ላይ፣ ቀጥታ በሚደረግ የዕጣ ማዞሪያ ነው። እባክዎ ትንሽ ይጠብቁን — ሰዓቱ በቅርቡ ይገለጻል! 🍀`;
 
-  // A real, static wheel graphic — every number sitting on its own colored
-  // slice — posted the moment the round fills up, loaded and waiting.
-  const channelCaption =
-    dmText + `\n\n⏳ <i>የአስተዳዳሪዎቻችንን ማጽደቅ በመጠባበቅ ላይ — ሲፈቀድ ወዲያውኑ ቀጥታ ይሽከረከራል!</i>`;
-
   if (ANNOUNCE_CHAT_ID) {
     try {
-      const wheelPng = renderIdleWheelPng(numbers);
-      const sent = await bot.telegram.sendPhoto(
-        ANNOUNCE_CHAT_ID,
-        { source: wheelPng, filename: 'wheel.png' },
-        { caption: channelCaption, parse_mode: 'HTML' }
-      );
-      pendingWheelMessages.set(tierCode, { chatId: ANNOUNCE_CHAT_ID, messageId: sent.message_id });
+      await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, dmText, { parse_mode: 'HTML' });
     } catch (e) {
       console.error('Could not announce full board to ANNOUNCE_CHAT_ID:', e.message);
     }
@@ -711,16 +714,20 @@ async function announceBoardFull(tierCode, round) {
     } catch (e) { /* user may have blocked the bot — ignore */ }
   }
 
-  // Ask the admins to approve the draw with a button — no command to type.
+  // Ask the admin to start the draw — pick a countdown preset (or instant).
   try {
     await bot.telegram.sendMessage(
       ADMIN_CHAT_ID,
       `📣 <b>${tier.label} ደረጃ ሙሉ ሆኗል (ዙር ${round})።</b>\n\n` +
-        `ማዞሪያውን ለማጽደቅ ከታች ይንኩ፦ (ወይም ሰዓት ለማሳወቅ <code>/settime &lt;ሰዓት&gt;</code> ይላኩ)`,
+        `ማዞሪያውን ለመጀመር ከታች ይምረጡ፦`,
       {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
-          Markup.button.callback('✅ አጽድቅ እና አዙር', `spinok:${tierCode}`),
+          [
+            Markup.button.callback('⏱ 1 ደቂቃ', `spinset:${tierCode}:60`),
+            Markup.button.callback('⏱ 5 ደቂቃ', `spinset:${tierCode}:300`),
+          ],
+          [Markup.button.callback('⚡ ወዲያውኑ', `spinset:${tierCode}:0`)],
         ]),
       }
     );
@@ -729,77 +736,15 @@ async function announceBoardFull(tierCode, round) {
   }
 }
 
-// Admin-only: announce the specific draw time to the channel and to every
-// confirmed participant in the current (full) round. Free-text time — the
-// admin decides the format ("ዛሬ ምሽት 9:00", a full date, etc).
-bot.command('settime', async (ctx) => {
-  if (!isAdminChat(ctx)) return;
-  const tierCode = 'a';
-  const round = store.getCurrentRound(tierCode);
-  const status = store.getTierStatus(tierCode);
-  if (status !== 'full' && status !== 'scheduled') {
-    return ctx.reply('ደረጃው ገና ሙሉ አልሆነም — ሁሉም ቁጥሮች ተከፍለው እስኪረጋገጡ ድረስ ሰዓት ማዘጋጀት አያስፈልግም።');
-  }
-
-  const drawTime = ctx.message.text.replace(/^\/settime(@\w+)?\s*/, '').trim();
-  if (!drawTime) {
-    return ctx.reply('አጠቃቀም፦ /settime <ቀን እና ሰዓት>  (ለምሳሌ: /settime ዛሬ ምሽት 9:00)');
-  }
-
-  store.setDrawTime(tierCode, drawTime);
-  store.setTierStatus(tierCode, 'scheduled');
-
-  const tier = TIERS[tierCode];
-  const text =
-    `⏰ <b>የዕጣ ሰዓት ተገልጿል!</b> — ${tier.label} ደረጃ (ዙር ${round})\n\n` +
-    `🎡 አሸናፊው በ<b>${drawTime}</b> ላይ ቀጥታ በሚደረግ የዕጣ ማዞሪያ ይመረጣል። እባክዎ በሰዓቱ ከቻናላችን ጋር ይቆዩ! 🍀`;
-
-  if (ANNOUNCE_CHAT_ID) {
-    try {
-      await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, text, { parse_mode: 'HTML' });
-    } catch (e) {
-      console.error('Could not announce draw time to ANNOUNCE_CHAT_ID:', e.message);
-    }
-  }
-
-  const rows = store.getTierNumbers(tierCode, round).filter((r) => r.status === 'confirmed' && r.user_id);
-  for (const r of rows) {
-    try {
-      await bot.telegram.sendMessage(r.user_id, text, { parse_mode: 'HTML' });
-    } catch (e) { /* ignore */ }
-  }
-
-  ctx.reply(`✅ ሰዓቱ ተመዝግቧል እና ተገልጿል፦ ${drawTime}`);
-});
-
-// ---------- Live spin wheel — admin-triggered ----------
-
-// Admin-only manual command to kick off the live, animated draw once a round is full.
-bot.command('spin', async (ctx) => {
-  if (!isAdminChat(ctx)) return;
-  const tierCode = 'a';
-  const round = store.getCurrentRound(tierCode);
-  const status = store.getTierStatus(tierCode);
-  const confirmed = store.countConfirmed(tierCode, round);
-
-  if (confirmed < TOTAL_NUMBERS) {
-    return ctx.reply('ገና ሁሉም ቁጥሮች አልተያዙም — ማዞሪያውን ማስጀመር አይቻልም።');
-  }
-  if (status === 'drawing') {
-    return ctx.reply('ማዞሪያው አስቀድሞ በመካሄድ ላይ ነው።');
-  }
-
-  store.setTierStatus(tierCode, 'drawing');
-  await ctx.reply('🎡 ማዞሪያው ተጀምሯል — ወደ ማስታወቂያ ቻናሉ ይሂዱ!');
-  await startLiveSpin(tierCode, round);
-});
-
-// Admin-only: the "✅ አጽድቅ እና አዙር" button posted alongside the full-board
-// notice. This is the normal way to start a draw — approve with one tap and
-// the bot spins automatically, no command to type.
-bot.action(/^spinok:a$/, async (ctx) => {
+// Admin-only: sends the Mini App link to the announcement channel (a
+// `url` button — `web_app` buttons don't work on channel posts) and kicks
+// off the countdown/spin timers server-side. Every viewer's Mini App polls
+// the SAME server state, so everyone sees the same countdown and the same
+// winner reveal at the same moment.
+bot.action(/^spinset:a:(\d+)$/, async (ctx) => {
   if (!isAdminChat(ctx)) return ctx.answerCbQuery('Admins only.', { show_alert: true });
   const tierCode = 'a';
+  const seconds = parseInt(ctx.match[1], 10);
   const round = store.getCurrentRound(tierCode);
   const status = store.getTierStatus(tierCode);
   const confirmed = store.countConfirmed(tierCode, round);
@@ -812,77 +757,60 @@ bot.action(/^spinok:a$/, async (ctx) => {
   }
 
   store.setTierStatus(tierCode, 'drawing');
-  await ctx.answerCbQuery('🎡 ማዞሪያው ጸድቋል — በመሽከርከር ላይ!');
+  const targetTime = Date.now() + seconds * 1000;
+  store.setSpinSchedule(tierCode, targetTime, seconds > 0 ? 'counting' : 'spinning');
+
+  await ctx.answerCbQuery(seconds > 0 ? '⏳ ካውንትዳውን ተጀምሯል!' : '🎡 ወዲያውኑ በመሽከርከር ላይ!');
   try {
-    await ctx.editMessageText(ctx.callbackQuery.message.text + '\n\n✅ ማዞሪያው ጸድቋል — በማስታወቂያ ቻናሉ ላይ በቀጥታ እየተሽከረከረ ነው!');
+    const label = seconds > 0 ? `⏳ ካውንትዳውን (${Math.round(seconds / 60)} ደቂቃ) ተጀምሯል` : '⚡ ወዲያውኑ ተጀምሯል';
+    await ctx.editMessageText(ctx.callbackQuery.message.text + `\n\n✅ ${label} — ቀጥታ በMini App!`);
   } catch (e) { /* ignore */ }
-  await startLiveSpin(tierCode, round);
+
+  await postSpinLink(tierCode, round, seconds);
+
+  // Move status -> 'spinning' right when the countdown hits zero, then
+  // resolve the winner once the wheel's had time to animate. If the
+  // process restarts mid-countdown, the recovery sweep below picks this
+  // back up from the persisted spin_target_time.
+  setTimeout(() => {
+    store.setSpinStatus(tierCode, 'spinning');
+    setTimeout(() => resolveSpin(tierCode, round), SPIN_ANIMATION_MS);
+  }, Math.max(0, seconds * 1000));
 });
 
-async function startLiveSpin(tierCode, round) {
+async function postSpinLink(tierCode, round, countdownSeconds) {
+  if (!ANNOUNCE_CHAT_ID) return;
+  const tier = TIERS[tierCode];
+  const text =
+    countdownSeconds > 0
+      ? `🎡 <b>${tier.label} ደረጃ — የዕጣ ማዞሪያ በቅርቡ ይጀምራል!</b> (ዙር ${round})\n\n` +
+        `⏳ ማዞሪያው የሚጀምረው በ<b>${Math.round(countdownSeconds / 60)} ደቂቃ</b> ውስጥ ነው። ቀጥታ ካውንትዳውን እና ማዞሪያውን ለማየት ከታች ይንኩ 👇`
+      : `🎡 <b>${tier.label} ደረጃ — የዕጣ ማዞሪያ አሁን እየተካሄደ ነው!</b> (ዙር ${round})\n\nቀጥታ ለማየት ከታች ይንኩ 👇`;
+
+  try {
+    await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, text, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([Markup.button.url('🎡 ቀጥታ ማዞሪያውን ይክፈቱ', spinAppUrl(tierCode, round))]),
+    });
+  } catch (e) {
+    console.error('Could not post spin link to ANNOUNCE_CHAT_ID:', e.message);
+  }
+}
+
+// Picks the winner, records it, and announces it in plain text too (for
+// anyone who didn't open the Mini App). The Mini App itself picks this up
+// via polling /api/spin/:tier/:round and animates the wheel landing on it.
+async function resolveSpin(tierCode, round) {
   const tier = TIERS[tierCode];
   const winnerRow = store.pickWinnerRow(tierCode, round);
   if (!winnerRow) {
     store.setTierStatus(tierCode, 'open');
+    store.resetSpin(tierCode);
     return;
   }
 
-  if (!ANNOUNCE_CHAT_ID) {
-    console.error('ANNOUNCE_CHAT_ID not set — cannot run the live spin.');
-    store.setTierStatus(tierCode, 'open');
-    return;
-  }
-
-  const numbers = [];
-  for (let n = 1; n <= TOTAL_NUMBERS; n++) numbers.push(n);
-
-  // The whole draw — laps + deceleration + landing on the real winner —
-  // baked into one animated GIF, so it plays as a single continuous spin
-  // instead of a series of separate edits.
-  const { buffer: gifBuffer, durationMs } = renderSpinGif(numbers, winnerRow.number);
-  const header = `🎡 <b>${tier.label} ደረጃ — ቀጥታ የዕጣ ማዞሪያ (ዙር ${round})</b>`;
-
-  // Prefer turning the same "ready wheel" photo posted when the board
-  // filled up into the live spin in place. Falls back to a fresh message
-  // if that one is gone (e.g. bot restarted).
-  const pending = pendingWheelMessages.get(tierCode);
-  pendingWheelMessages.delete(tierCode);
-
-  let spinChatId = ANNOUNCE_CHAT_ID;
-  let spinMessageId = null;
-
-  if (pending) {
-    try {
-      await bot.telegram.editMessageMedia(pending.chatId, pending.messageId, undefined, {
-        type: 'animation',
-        media: { source: gifBuffer, filename: 'spin.gif' },
-        caption: header,
-        parse_mode: 'HTML',
-      });
-      spinChatId = pending.chatId;
-      spinMessageId = pending.messageId;
-    } catch (e) { /* message may be gone — fall through and send a fresh one */ }
-  }
-
-  if (!spinMessageId) {
-    try {
-      const sent = await bot.telegram.sendAnimation(
-        ANNOUNCE_CHAT_ID,
-        { source: gifBuffer, filename: 'spin.gif' },
-        { caption: header, parse_mode: 'HTML' }
-      );
-      spinMessageId = sent.message_id;
-    } catch (e) {
-      console.error('Could not start live spin on ANNOUNCE_CHAT_ID:', e.message);
-      store.setTierStatus(tierCode, 'open');
-      return;
-    }
-  }
-
-  // Let the spin actually finish playing before revealing the winner card,
-  // so the announcement lands right as the wheel stops.
-  await sleep(durationMs);
-
+  store.setSpinWinner(tierCode, winnerRow.number);
+  store.setSpinStatus(tierCode, 'done');
   store.recordWinner(tierCode, round, winnerRow.number, winnerRow.user_id, winnerRow.username);
 
   const finalText =
@@ -892,13 +820,12 @@ async function startLiveSpin(tierCode, round) {
     `📱 ስልክ፦ <code>${winnerRow.phone || '—'}</code>\n\n` +
     `✨ እንኳን ደስ አለዎት! አዲስ ዙር አሁን ይጀምራል — ለመቀላቀል ቁጥር ይምረጡ።`;
 
-  try {
-    await bot.telegram.editMessageCaption(spinChatId, spinMessageId, undefined, finalText, { parse_mode: 'HTML' });
-  } catch (e) {
-    console.error('Could not post final draw result to ANNOUNCE_CHAT_ID:', e.message);
+  if (ANNOUNCE_CHAT_ID) {
     try {
       await bot.telegram.sendMessage(ANNOUNCE_CHAT_ID, finalText, { parse_mode: 'HTML' });
-    } catch (e2) { /* ignore */ }
+    } catch (e) {
+      console.error('Could not post final draw result to ANNOUNCE_CHAT_ID:', e.message);
+    }
   }
 
   try {
@@ -920,17 +847,23 @@ async function startLiveSpin(tierCode, round) {
   }
 
   store.startNewRound(tierCode);
+  store.resetSpin(tierCode);
 }
 
 // Admin-only manual command to force-start a fresh round for a tier (e.g. to reset a stalled one)
 bot.command('newround', async (ctx) => {
   if (!isAdminChat(ctx)) return;
   const tierCode = 'a';
+  store.resetSpin(tierCode);
   const next = store.startNewRound(tierCode);
   ctx.reply(`ለ${TIERS[tierCode].label} ደረጃ ዙር ${next} ተጀምሯል። ሁሉም ቁጥሮች እንደገና ክፍት ናቸው።`);
 });
 
-// ---------- Safety net: periodic sweep for expired locks (covers server restarts) ----------
+// ---------- Safety net: periodic sweep for expired locks + interrupted spins ----------
+// Covers server restarts: an in-flight LOCK_MINUTES countdown or a
+// counting/spinning draw both live only in in-memory setTimeouts, so if the
+// process restarts mid-countdown this sweep resumes them from the
+// persisted state instead of leaving a round stuck forever.
 setInterval(() => {
   const cutoff = Date.now() - LOCK_MINUTES * 60 * 1000;
   const expired = store.findExpiredLocks(cutoff);
@@ -947,6 +880,19 @@ setInterval(() => {
         .catch(() => {});
     }
   }
+
+  for (const tierCode of Object.keys(TIERS)) {
+    const spin = store.getSpinState(tierCode);
+    if (!spin) continue;
+    if (spin.spin_status === 'counting' && spin.spin_target_time && Date.now() >= spin.spin_target_time) {
+      store.setSpinStatus(tierCode, 'spinning');
+      setTimeout(() => resolveSpin(tierCode, spin.current_round), SPIN_ANIMATION_MS);
+    } else if (spin.spin_status === 'spinning' && spin.spin_target_time && Date.now() >= spin.spin_target_time + SPIN_ANIMATION_MS) {
+      // We restarted mid-animation — resolve right away rather than leaving
+      // viewers staring at a wheel that never lands.
+      resolveSpin(tierCode, spin.current_round);
+    }
+  }
 }, 30 * 1000);
 
 // Global safety net: log unexpected errors instead of crashing the whole process.
@@ -957,7 +903,18 @@ process.on('unhandledRejection', (err) => {
   console.error('Unhandled promise rejection (bot kept running):', err && err.message);
 });
 
-bot.launch().then(() => console.log('Bot is running (polling mode).'));
+bot.launch().then(async () => {
+  console.log('Bot is running (polling mode).');
+  if (!BOT_USERNAME) {
+    try {
+      const me = await bot.telegram.getMe();
+      BOT_USERNAME = me.username;
+      console.log(`Fetched bot username for Mini App links: @${BOT_USERNAME}`);
+    } catch (e) {
+      console.error('Could not fetch bot username — set BOT_USERNAME in .env instead.', e.message);
+    }
+  }
+});
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
