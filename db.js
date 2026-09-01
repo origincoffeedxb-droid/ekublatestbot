@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS active_locks (
   user_id INTEGER PRIMARY KEY,
   tier TEXT NOT NULL,
   round INTEGER NOT NULL,
-  numbers TEXT NOT NULL, -- comma-separated numbers this user currently has locked, e.g. "12,45,67,88,3"
+  number INTEGER NOT NULL,
   locked_at INTEGER NOT NULL
 );
 
@@ -50,20 +50,19 @@ if (!hasPhoneColumn) {
   db.exec('ALTER TABLE numbers ADD COLUMN phone TEXT');
 }
 
-// Migration: older databases have a single `number` column on active_locks
-// (one locked number per user at a time). The multi-pick flow needs a user
-// to hold several numbers at once for a single reservation, so this table
-// now stores them as a comma-separated list instead. Rows here are only
-// ever in-flight (unpaid) reservations, so it's safe to rebuild it empty.
+// Migration: databases from the short-lived multi-pick experiment have a
+// `numbers` (plural, CSV) column on active_locks instead of a single
+// `number` column. Rebuild the table for the single-pick design — any rows
+// here are just in-flight (unpaid) reservations, so it's safe to reset.
 const activeLocksCols = db.prepare("PRAGMA table_info(active_locks)").all().map((col) => col.name);
-if (activeLocksCols.length && !activeLocksCols.includes('numbers')) {
+if (activeLocksCols.length && !activeLocksCols.includes('number')) {
   db.exec(`
     DROP TABLE active_locks;
     CREATE TABLE active_locks (
       user_id INTEGER PRIMARY KEY,
       tier TEXT NOT NULL,
       round INTEGER NOT NULL,
-      numbers TEXT NOT NULL,
+      number INTEGER NOT NULL,
       locked_at INTEGER NOT NULL
     );
   `);
@@ -88,25 +87,8 @@ function getTierNumbers(tier, round) {
   ).all(tier, round);
 }
 
-// Returns the user's current in-flight reservation — the batch of numbers
-// they've picked but not yet paid for / been confirmed on — or null.
 function getActiveLock(userId) {
-  const row = db.prepare('SELECT * FROM active_locks WHERE user_id = ?').get(userId);
-  if (!row) return null;
-  return { ...row, numbers: row.numbers.split(',').filter(Boolean).map(Number) };
-}
-
-// Creates or replaces the user's active reservation batch.
-function setActiveLock(userId, tier, round, numbers, lockedAt) {
-  db.prepare(
-    `INSERT INTO active_locks (user_id, tier, round, numbers, locked_at) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET tier = excluded.tier, round = excluded.round,
-       numbers = excluded.numbers, locked_at = excluded.locked_at`
-  ).run(userId, tier, round, numbers.join(','), lockedAt);
-}
-
-function clearActiveLock(userId) {
-  db.prepare('DELETE FROM active_locks WHERE user_id = ?').run(userId);
+  return db.prepare('SELECT * FROM active_locks WHERE user_id = ?').get(userId);
 }
 
 // Looks up every reserved number (any tier/round, any status) a given
@@ -129,14 +111,24 @@ function getNumbersByPhone(phone) {
 
 function lockNumber(tier, round, number, userId, username) {
   const now = Date.now();
-  db.prepare(
-    `INSERT INTO numbers (tier, round, number, status, user_id, username, locked_at)
-     VALUES (?, ?, ?, 'locked', ?, ?, ?)`
-  ).run(tier, round, number, userId, username, now);
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO numbers (tier, round, number, status, user_id, username, locked_at)
+       VALUES (?, ?, ?, 'locked', ?, ?, ?)`
+    ).run(tier, round, number, userId, username, now);
+    db.prepare(
+      `INSERT INTO active_locks (user_id, tier, round, number, locked_at) VALUES (?, ?, ?, ?, ?)`
+    ).run(userId, tier, round, number, now);
+  });
+  tx();
 }
 
-function releaseNumber(tier, round, number) {
-  db.prepare('DELETE FROM numbers WHERE tier = ? AND round = ? AND number = ?').run(tier, round, number);
+function releaseNumber(tier, round, number, userId) {
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM numbers WHERE tier = ? AND round = ? AND number = ?').run(tier, round, number);
+    if (userId) db.prepare('DELETE FROM active_locks WHERE user_id = ?').run(userId);
+  });
+  tx();
 }
 
 function setPayerPhone(tier, round, number, phone) {
@@ -151,10 +143,14 @@ function submitTxn(tier, round, number, txnId) {
   ).run(txnId, tier, round, number);
 }
 
-function confirmNumber(tier, round, number) {
-  db.prepare(
-    `UPDATE numbers SET status = 'confirmed' WHERE tier = ? AND round = ? AND number = ?`
-  ).run(tier, round, number);
+function confirmNumber(tier, round, number, userId) {
+  const tx = db.transaction(() => {
+    db.prepare(
+      `UPDATE numbers SET status = 'confirmed' WHERE tier = ? AND round = ? AND number = ?`
+    ).run(tier, round, number);
+    if (userId) db.prepare('DELETE FROM active_locks WHERE user_id = ?').run(userId);
+  });
+  tx();
 }
 
 function countConfirmed(tier, round) {
@@ -200,8 +196,6 @@ module.exports = {
   getNumberRow,
   getTierNumbers,
   getActiveLock,
-  setActiveLock,
-  clearActiveLock,
   getNumbersByUser,
   getNumbersByPhone,
   lockNumber,
