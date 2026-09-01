@@ -1,19 +1,32 @@
-// Mini App server: serves the static countdown/spin UI (public/) and a
-// small read-only JSON API backed by the SAME SQLite database bot.js
-// writes to. This process never mutates draw state itself — bot.js is the
-// single source of truth for who won; this just lets every viewer poll the
-// same state so their wheels animate in sync.
+// Mini App server: serves the static countdown/spin UI and a small
+// read-only JSON API backed by the SAME SQLite database bot.js writes to.
+// This process never mutates draw state itself — bot.js is the single
+// source of truth for who won; this just lets every viewer poll the same
+// state so their wheels animate in sync.
+//
+// Layout note: this repo keeps everything flat in the root (index.html,
+// app.js, style.css, server.js, bot.js, db.js all side by side) rather than
+// in a webapp/public/ subfolder — so files are served explicitly by name
+// below instead of via a static directory, which would otherwise also
+// expose bot.js/db.js source over HTTP.
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
-const store = require('../db');
+const store = require('./db');
 
 const PORT = process.env.WEBAPP_PORT || process.env.PORT || 3000;
 const TOTAL_NUMBERS = 5; // keep in sync with TOTAL_NUMBERS in bot.js
 const SPIN_ANIMATION_MS = 6000; // keep in sync with SPIN_ANIMATION_MS in bot.js and app.js
 
 const app = express();
-app.use(express.static(path.join(__dirname, 'public')));
+
+// Explicit static files only — NOT express.static(__dirname), which would
+// also serve bot.js/db.js (and any .env that accidentally ends up in the
+// deploy) as plain downloadable files.
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/index.html', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/app.js', (req, res) => res.sendFile(path.join(__dirname, 'app.js')));
+app.get('/style.css', (req, res) => res.sendFile(path.join(__dirname, 'style.css')));
 
 function maskPhone(phone) {
   if (!phone) return null;
